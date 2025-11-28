@@ -1,0 +1,14 @@
+Metadata-Version: 2.4
+Name: ellice
+Version: 0.1.0
+Summary: ElliCE: Actionability-aware Robust Counterfactual Explanations
+Author: Bohdan Turbal
+Requires-Dist: numpy
+Requires-Dist: pandas
+Requires-Dist: torch
+Requires-Dist: scikit-learn
+Requires-Dist: pyyaml
+Requires-Dist: matplotlib
+Dynamic: author
+Dynamic: requires-dist
+Dynamic: summary
