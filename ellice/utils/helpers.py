@@ -35,7 +35,7 @@ def compute_ellipsoid(
     m = H_feats.shape[1]
     I = np.eye(m)
     
-    logits = H_feats @ theta_star.cpu().numpy()
+    logits = H_feats @ theta_star.cpu().detach().numpy()
     p = 1.0 / (1.0 + np.exp(-logits))
     
     # Hessian approximation

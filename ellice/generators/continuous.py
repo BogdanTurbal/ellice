@@ -33,6 +33,7 @@ class ContinuousGenerator(EllipsoidGenerator):
         features_to_vary: Optional[List[str]] = None,
         permitted_range: Optional[Dict[str, List[float]]] = None,
         one_way_change: Optional[Dict[str, str]] = None,
+        allowed_values: Optional[Dict[str, List[float]]] = None,
         one_hot_groups: Optional[List[List[str]]] = None,
         gumbel_temperature: float = 1.0,
         target_class: int = 1,
@@ -40,6 +41,11 @@ class ContinuousGenerator(EllipsoidGenerator):
         patience: int = 20,
         progress_bar: bool = True,
         gradient_mode: str = "min-max", # "min-max" or "full_grad"
+        feature_weights: Optional[Dict[str, float]] = None, # Weight per feature
+        group_weights: Optional[Dict[str, float]] = None, # Weight per one-hot group (key can be first feature name or index?)
+        # Let's use index or name of first feature. Better: accept feature_weights where keys are feature names.
+        # For groups, if all features in group have same weight, we can just use that.
+        allowed_ranges_closest_grad: bool = False, 
         **kwargs
     ) -> pd.DataFrame:
         
@@ -47,6 +53,37 @@ class ContinuousGenerator(EllipsoidGenerator):
         x_orig = torch.tensor(query_instance.values, dtype=self.dtype, device=self.device).unsqueeze(0)
         feature_names = self.data.feature_names
         input_dim = len(feature_names)
+        
+        # Compute Weights Vector (for L2 loss)
+        # Default: 1.0 for everything
+        loss_weights = torch.ones(input_dim, device=self.device, dtype=self.dtype)
+        
+        # 1. Apply feature_weights
+        if feature_weights:
+            for feat, w in feature_weights.items():
+                if feat in feature_names:
+                    idx = feature_names.index(feat)
+                    loss_weights[idx] = w
+                    
+        # 2. Apply default 0.5 weight for one-hot groups if not specified
+        if one_hot_groups:
+            for group in one_hot_groups:
+                # Check if user provided explicit weights for any feature in this group
+                # If yes, respect them. If no, set to 0.5
+                # Wait, user said "each group by default has weight 1/2".
+                # Does this mean sum of weights in group is 1/2? Or each feature is 1/2?
+                # Example: (1,0,0) -> (0,1,0). Diff vector: (-1, 1, 0). L2^2 = 1+1=2. L2 = sqrt(2).
+                # User wants distance 1.
+                # If weight is w, then weighted L2^2 = w*(-1)^2 + w*(1)^2 = 2w.
+                # We want sqrt(2w) = 1 => 2w = 1 => w = 0.5.
+                # So yes, weight 0.5 per feature in the group achieves distance 1 for a swap.
+                
+                indices = [feature_names.index(col) for col in group if col in feature_names]
+                for idx in indices:
+                    feat_name = feature_names[idx]
+                    # If not explicitly overridden by feature_weights
+                    if feature_weights is None or feat_name not in feature_weights:
+                        loss_weights[idx] = 0.5
         
         # Handle One-Hot Groups
         if one_hot_groups:
@@ -83,8 +120,9 @@ class ContinuousGenerator(EllipsoidGenerator):
                 current_vals = x_orig[0, group_indices]
                 active_idx = torch.argmax(current_vals).item()
                 
-                logits = torch.zeros(len(group_indices), device=self.device, dtype=self.dtype, requires_grad=True)
-                logits.data[active_idx] = 2.0 # Strong bias towards original
+                # Initialize with 0.1, then set active to 2.0
+                logits = torch.full((len(group_indices),), 0.1, device=self.device, dtype=self.dtype, requires_grad=True)
+                logits.data[active_idx] = 1.0 # Strong bias towards original
                 
                 cat_logits_list.append(logits)
                 params.append(logits)
@@ -122,6 +160,8 @@ class ContinuousGenerator(EllipsoidGenerator):
         
         # Pre-compute indices for constraints to speed up loop
         range_constraints_cont = [] # (local_cont_idx, min, max)
+        allowed_values_cont = [] # (local_cont_idx, sorted_tensor_values)
+
         if permitted_range:
             for feat, (min_v, max_v) in permitted_range.items():
                 if feat in feature_names:
@@ -129,6 +169,16 @@ class ContinuousGenerator(EllipsoidGenerator):
                     if global_idx in continuous_indices:
                         local_idx = continuous_indices.index(global_idx)
                         range_constraints_cont.append((local_idx, min_v, max_v))
+        
+        if allowed_values:
+            for feat, vals in allowed_values.items():
+                if feat in feature_names:
+                    global_idx = feature_names.index(feat)
+                    if global_idx in continuous_indices:
+                        local_idx = continuous_indices.index(global_idx)
+                        # Sort values and convert to tensor
+                        vals_sorted = torch.tensor(sorted(vals), device=self.device, dtype=self.dtype)
+                        allowed_values_cont.append((local_idx, vals_sorted))
                     
         one_way_constraints_cont = [] # (local_cont_idx, direction)
         if one_way_change:
@@ -202,17 +252,223 @@ class ContinuousGenerator(EllipsoidGenerator):
                 loss_robust = F.relu( robust_logit)
 
             # 3. Proximity Loss
-            loss_prox = torch.norm(x_cf_full - x_orig, p=2)
+            # Weighted L2
+            diff = x_cf_full - x_orig
+            # We want sqrt( sum( w_i * diff_i^2 ) )?
+            # Or sum( w_i * diff_i^2 )? 
+            # Standard weighted L2 is usually sqrt( (Wx)^T (Wx) ) or sqrt( x^T W x ).
+            # Let's assume loss_weights represents diagonal of W matrix in x^T W x?
+            # No, usually weights apply to the cost.
+            # User said: "weight 1/2 (because I want... distance 1)"
+            # Implies the contribution to the DISTANCE metric.
+            # If we use torch.norm(weighted_diff), that is sqrt( sum (w_i * d_i)^2 ).
+            # If w_i = 0.5, then contribution is 0.5 * diff.
+            # For (1,0) -> (0,1), diff is (-1, 1).
+            # Weighted diff: (-0.5, 0.5). Norm^2 = 0.25 + 0.25 = 0.5. Norm = 0.707.
+            # This is NOT 1.
+            
+            # User wants: Distance between (1,0) and (0,1) to be 1.
+            # Unweighted squared distance is 2.
+            # We want Weighted Squared Distance = 1.
+            # Sum w_i * (diff_i)^2 = 1?
+            # w * 1 + w * 1 = 2w = 1 => w = 0.5.
+            # So we need sqrt( sum( w_i * diff_i^2 ) ).
+            
+            weighted_diff_sq = loss_weights * (diff ** 2)
+            loss_prox = torch.sqrt(torch.sum(weighted_diff_sq))
             
             # Total Loss
             loss = robustness_weight * loss_robust + proximity_weight * loss_prox
             
             loss.backward()
+            
+            # "Gradient Interpolation" for Allowed Values
+            if x_cont is not None and x_cont.grad is not None and allowed_values_cont:
+                # Prepare batch of inputs to compute gradients at discrete points
+                # For each feature i with allowed values, we need to evaluate at v_left and v_right
+                # We can construct a large batch where:
+                # Row 0: original x_cf
+                # Row 1: x_cf with feature i = v_left
+                # Row 2: x_cf with feature i = v_right
+                # ... for all i
+                
+                # However, computing full gradients for all these is expensive (backward pass per row?)
+                # Or can we do one backward pass on sum of losses?
+                # If we have K constrained features, we have 2*K perturbed inputs.
+                # We want dLoss/dx_i AT perturbed input.
+                # If we put them in a batch, `backward()` accumulates gradients into x_cont.grad? 
+                # No, we need separate gradients.
+                
+                # Efficient Strategy:
+                # 1. We assume we only need the gradient w.r.t the *specific* feature i being perturbed.
+                # 2. We can use `torch.autograd.grad` on the batched output.
+                
+                # Construct batch
+                batch_inputs = []
+                interpolation_weights = [] # (idx, w_left, w_right)
+                
+                with torch.no_grad():
+                    current_x = x_cf_full.clone()
+                    
+                    for idx, vals in allowed_values_cont:
+                        val = x_cont.data[idx]
+                        
+                        # Find nearest
+                        diff = val - vals
+                        left_mask = diff >= 0
+                        v_left = vals[left_mask].max() if left_mask.any() else vals[0]
+                        right_mask = diff <= 0
+                        v_right = vals[right_mask].min() if right_mask.any() else vals[-1]
+                        
+                        # If allowed_ranges_closest_grad is True, we only use the closest one
+                        if allowed_ranges_closest_grad:
+                            # Distance to left and right
+                            d_left = (val - v_left).abs()
+                            d_right = (v_right - val).abs()
+                            
+                            if d_left <= d_right:
+                                v_target = v_left
+                            else:
+                                v_target = v_right
+                                
+                            # We treat this as if we are AT v_target for gradient computation
+                            # Weight 1.0 for target, 0.0 for other
+                            # Just reuse existing logic with p=1
+                            interpolation_weights.append((idx, 1.0 if v_target == v_left else 0.0, 1.0 if v_target == v_right else 0.0))
+                            
+                            # Only add the target to batch inputs?
+                            # The current logic constructs both left and right and weights them.
+                            # If we set weight to 0, the gradient contribution is 0.
+                            # But we still pay compute cost for the 0-weight one.
+                            # Optimization: If p=0, don't add to batch?
+                            # Current implementation relies on indices 2*k and 2*k+1.
+                            # Changing that is complex. Keeping it simple: compute both, weight one 0.
+                            
+                            x_left = current_x.clone()
+                            x_left[0, continuous_indices[idx]] = v_left
+                            batch_inputs.append(x_left)
+                            
+                            x_right = current_x.clone()
+                            x_right[0, continuous_indices[idx]] = v_right
+                            batch_inputs.append(x_right)
+                            
+                            continue
+
+                        if v_left == v_right:
+                            interpolation_weights.append((idx, 0.5, 0.5)) # Doesn't matter
+                            # Add dummy duplicates to keep indexing consistent
+                            batch_inputs.append(current_x)
+                            batch_inputs.append(current_x)
+                            continue
+                            
+                        d_left = (val - v_left).abs()
+                        d_right = (v_right - val).abs()
+                        total_d = d_left + d_right + 1e-9
+                        p_left = 1 - (d_left / total_d)
+                        p_right = 1 - (d_right / total_d)
+                        sum_p = p_left + p_right
+                        p_left /= sum_p
+                        p_right /= sum_p
+                        
+                        interpolation_weights.append((idx, p_left, p_right))
+                        
+                        # Left Input
+                        x_left = current_x.clone()
+                        x_left[0, continuous_indices[idx]] = v_left
+                        batch_inputs.append(x_left)
+                        
+                        # Right Input
+                        x_right = current_x.clone()
+                        x_right[0, continuous_indices[idx]] = v_right
+                        batch_inputs.append(x_right)
+                
+                if batch_inputs:
+                    # Stack batch: [2*K, input_dim]
+                    batch_tensor = torch.cat(batch_inputs, dim=0)
+                    # Enable grad for input to get dLoss/dx
+                    batch_tensor.requires_grad_(True)
+                    
+                    # Forward Pass (Batch)
+                    h_flat_batch = self._get_penult_features(batch_tensor)
+                    bias_batch = torch.ones(h_flat_batch.size(0), 1, device=self.device, dtype=self.dtype)
+                    h_aug_batch = torch.cat([h_flat_batch, bias_batch], dim=1)
+                    
+                    # Compute Robust Logit (Batch)
+                    if gradient_mode == "full_grad":
+                        u_batch = inv_sqrt @ h_aug_batch.T
+                        term2_batch = torch.norm(u_batch, p=2, dim=0)
+                        term1_batch = torch.matmul(h_aug_batch, self.omega_c).squeeze()
+                        robust_logit_batch = term1_batch - term2_batch
+                        if target_class == 0:
+                            robust_logit_batch = term1_batch + term2_batch
+                    else:
+                        # Min-Max approx for batch (independent worst case per sample)
+                        # This re-computes worst theta for each
+                        # For efficiency we can use the same logic
+                        with torch.no_grad():
+                            # Analytic worst case
+                            u_b = inv_sqrt @ h_aug_batch.T
+                            norms_b = u_b.norm(dim=0)
+                            dirs_b = (inv_sqrt @ u_b).T / (norms_b.unsqueeze(1) + 1e-9)
+                            if target_class == 0:
+                                worst_thetas = self.omega_c + dirs_b
+                            else:
+                                worst_thetas = self.omega_c - dirs_b
+                        
+                        # Logit
+                        robust_logit_batch = (h_aug_batch * worst_thetas).sum(dim=1)
+
+                    # Loss (Batch)
+                    if target_class == 1:
+                        loss_rob_batch = F.relu(-robust_logit_batch)
+                    else:
+                        loss_rob_batch = F.relu(robust_logit_batch)
+                        
+                    # Proximity (Batch) - Distance to x_orig
+                    # x_orig is [1, dim], batch is [N, dim]
+                    loss_prox_batch = torch.norm(batch_tensor - x_orig, p=2, dim=1)
+                    
+                    total_loss_batch = robustness_weight * loss_rob_batch + proximity_weight * loss_prox_batch
+                    
+                    # Backward (Batch)
+                    # We want grad of total_loss_batch w.r.t batch_tensor
+                    # sum() lets us compute all grads in one go
+                    total_loss_batch.sum().backward()
+                    
+                    # Extract Gradients
+                    batch_grads = batch_tensor.grad # [2*K, input_dim]
+                    
+                    # Update x_cont.grad
+                    # For each constrained feature, replace its gradient with weighted avg of discrete grads
+                    for k, (idx, p_left, p_right) in enumerate(interpolation_weights):
+                        # Indices in batch: 2*k and 2*k+1
+                        grad_left = batch_grads[2*k, continuous_indices[idx]]
+                        grad_right = batch_grads[2*k+1, continuous_indices[idx]]
+                        
+                        new_grad = p_left * grad_left + p_right * grad_right
+                        
+                        # Assign to main gradient
+                        x_cont.grad[idx] = new_grad
+
             optimizer.step()
+
+            #print(logits)
             
             # 4. Projections / Constraints (Only on Continuous Variables)
             with torch.no_grad():
                 if x_cont is not None:
+                    # Project to allowed values (Hard constraint at projection step? Or keep soft?)
+                    # User request: "probability proportional to closest left... apply it to continuous"
+                    # This sounds like we should keep it continuous during opt, but maybe snap at the end?
+                    # Or snap probabilistically?
+                    # Let's implement snapping to nearest allowed value at the END of optimization (or check validity).
+                    # During optimization, we just constrain to min/max of allowed range.
+                    
+                    # 1. Enforce min/max of allowed values as global bounds for that feature
+                    for idx, vals in allowed_values_cont:
+                        min_v, max_v = vals[0], vals[-1]
+                        x_cont.data[idx] = torch.clamp(x_cont.data[idx], min_v, max_v)
+
                     # Reset immutable features
                     if frozen_indices_cont:
                         x_cont.data[frozen_indices_cont] = x_orig.data[0, continuous_indices][frozen_indices_cont]
@@ -233,6 +489,15 @@ class ContinuousGenerator(EllipsoidGenerator):
                              x_cont.data[idx] = torch.max(x_cont.data[idx], orig_val)
                         elif direction == 'decrease':
                              x_cont.data[idx] = torch.min(x_cont.data[idx], orig_val)
+                             
+                    # Snap to allowed values (Hard constraint)
+                    # This effectively makes it discrete optimization via gradient descent + projection
+                    for idx, vals in allowed_values_cont:
+                        val = x_cont.data[idx]
+                        # Find nearest
+                        diff = (vals - val).abs()
+                        min_idx = torch.argmin(diff)
+                        x_cont.data[idx] = vals[min_idx]
                 
                 # Check validity
                 # Reconstruct discrete version for validation

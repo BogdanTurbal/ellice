@@ -29,6 +29,7 @@ class Explainer:
         features_to_vary: Union[str, List[str]] = 'all',
         permitted_range: Optional[Dict[str, List[float]]] = None,
         one_way_change: Optional[Dict[str, str]] = None,
+        allowed_values: Optional[Dict[str, List[float]]] = None,
         one_hot_groups: Optional[List[List[str]]] = None,
         robustness_epsilon: float = 0.01,
         regularization_coefficient: float = 1e-4,
@@ -82,6 +83,7 @@ class Explainer:
                     features_to_vary=features_to_vary,
                     permitted_range=permitted_range,
                     one_way_change=one_way_change,
+                    allowed_values=allowed_values,
                     one_hot_groups=one_hot_groups,
                     target_class=target_class,
                     **opt_params
