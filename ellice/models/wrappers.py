@@ -91,7 +91,9 @@ class PyTorchModel(ModelWrapper):
 
     def predict_proba(self, X: Union[np.ndarray, torch.Tensor]) -> np.ndarray:
         if isinstance(X, np.ndarray):
-            X = torch.from_numpy(X).float()
+            # Automatically detect device of the model parameters
+            device = next(self.model.parameters()).device
+            X = torch.from_numpy(X).float().to(device)
         
         with torch.no_grad():
             logits = self.model(X)
@@ -103,7 +105,7 @@ class PyTorchModel(ModelWrapper):
             else:
                 # Multiclass case
                 probs = torch.softmax(logits, dim=1)
-        return probs.numpy()
+        return probs.cpu().numpy()
 
 class SklearnModel(ModelWrapper):
     """
