@@ -27,12 +27,33 @@ pip install -e .
     *   **Categorical Features**: Handles one-hot encoded variables correctly using Gumbel-Softmax optimization.
 *   **Dual Modes**:
     *   **Continuous**: Gradient-based optimization for finding new, optimal counterfactuals.
-    *   **Data-Supported (Discrete)**: Selects the best robust candidates from existing data points.
-    *   **Backend Support**: Works seamlessly with both **Scikit-Learn** (Logistic Regression) and **PyTorch** models.
+    *   **Data-Supported**: Selects the best robust candidates from existing data points.
+    *   **Sparsity Support**: Find counterfactuals with minimal feature changes (available for both modes).
+*   **Backend Support**: Works seamlessly with both **Scikit-Learn** (Logistic Regression) and **PyTorch** models.
+*   **Device Agnostic**: Automatic GPU/CPU detection with explicit device control (CUDA/MPS/CPU).
+*   **Deterministic Execution**: Reproducible results with proper random seeding.
 
 ## Configuration
 
-ElliCE uses a robust configuration system for advanced control.
+ElliCE uses a robust configuration system for advanced control. The configuration is split into two classes:
+
+### GenerationConfig
+Controls default parameters for counterfactual generation:
+- `learning_rate`: Optimization learning rate (default: 0.1)
+- `max_iterations`: Maximum optimization iterations (default: 100)
+- `patience`: Early stopping patience (default: 50)
+- `robustness_weight`: Weight for robustness loss (default: 1.0)
+- `proximity_weight`: Weight for proximity loss (default: 0.0)
+- `gumbel_temperature`: Temperature for Gumbel-Softmax (default: 1.0)
+- `early_stopping`: Enable early stopping (default: True)
+- `progress_bar`: Show progress bar (default: True)
+
+### AlgorithmConfig
+Controls algorithmic stability and internal constants:
+- `epsilon`: Numerical stability epsilon (default: 1e-9)
+- `clip_grad_norm`: Gradient clipping threshold (default: 1.0)
+- `gumbel_epsilon`: Gumbel-Softmax epsilon (default: 1e-10)
+- `device`: Device selection - "auto" (default), "cpu", "cuda", or "mps"
 
 ```python
 from ellice.ellice.configs import GenerationConfig, AlgorithmConfig
@@ -41,6 +62,7 @@ from ellice.ellice.configs import GenerationConfig, AlgorithmConfig
 GenerationConfig.patience = 100
 GenerationConfig.learning_rate = 0.05
 AlgorithmConfig.epsilon = 1e-8
+AlgorithmConfig.device = "cuda"  # Force CUDA, or use "auto" for automatic detection
 ```
 
 ## Quick Start
@@ -68,7 +90,8 @@ data = ellice.Data(dataframe=full_df, target_column='target')
 exp = ellice.Explainer(
     model=clf,
     data=data,
-    backend='sklearn'
+    backend='sklearn',
+    device='auto'  # Automatically selects CUDA if available, else CPU
 )
 
 # 3. Generate Robust Counterfactual
@@ -181,11 +204,77 @@ Optimizes the input features directly using gradient descent.
 *   **Cons**: May produce synthetic points that don't exist in the data (though usually plausible).
 *   **Best for**: Numerical data, or when flexibility is key.
 
+**Sparsity Support**: Enable `sparsity=True` to find counterfactuals with minimal feature changes using iterative feature selection (Algorithm 3 from the paper).
+
+```python
+cf = exp.generate_counterfactuals(
+    query,
+    method='continuous',
+    sparsity=True,  # Find sparse counterfactuals
+    ...
+)
+```
+
 ### Data-Supported Generator (`method='data_supported'`)
 Selects the best counterfactual from the existing training data (or a provided candidate set).
 *   **Pros**: Guarantees the counterfactual is a real, observed data point (high plausibility).
 *   **Cons**: Limited by the availability of data points; may not find a solution if the dataset is sparse.
 *   **Best for**: Highly constrained domains (e.g., medical) where synthetic examples are risky.
+
+**Search Modes**:
+- `search_mode='filtering'` (default): Brute-force filtering of all candidates. Works with or without sparsity.
+- `search_mode='kdtree'`: Fast KDTree-based nearest neighbor search. Only available when `sparsity=False` and no actionability restrictions.
+- `search_mode='ball_tree'`: BallTree with custom sparsity-aware distance metric (C × Hamming + L1). Requires `sparsity=True` and no actionability restrictions.
+
+```python
+# Default filtering (always works)
+cf = exp.generate_counterfactuals(
+    query,
+    method='data_supported',
+    search_mode='filtering',
+    sparsity=False,
+    ...
+)
+
+# Fast KDTree (no sparsity, no restrictions)
+cf = exp.generate_counterfactuals(
+    query,
+    method='data_supported',
+    search_mode='kdtree',
+    sparsity=False,
+    ...
+)
+
+# Sparse search with BallTree (sparsity=True, no restrictions)
+cf = exp.generate_counterfactuals(
+    query,
+    method='data_supported',
+    search_mode='ball_tree',
+    sparsity=True,
+    ...
+)
+```
+
+## Reproducibility
+
+For deterministic results, set random seeds before running:
+
+```python
+import random
+import numpy as np
+import torch
+
+def seed_everything(seed: int):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+seed_everything(42)  # Set before training models and generating counterfactuals
+```
 
 ## Citation
 
