@@ -4,8 +4,9 @@ import numpy as np
 
 from .models import load_model
 from .data import Data
-from .generators.discrete import DiscreteGenerator
+from .generators.data_supported import DataSupportedGenerator
 from .generators.continuous import ContinuousGenerator
+from .configs import AlgorithmConfig
 
 class Explainer:
     """
@@ -16,10 +17,17 @@ class Explainer:
         self,
         model: Any,
         data: Data,
-        backend: str = 'auto'
+        backend: str = 'auto',
+        device: Optional[str] = None
     ):
         self.model = load_model(model, backend=backend)
         self.data = data
+        
+        # Resolve device
+        if device is not None:
+            self.device = device
+        else:
+            self.device = AlgorithmConfig.get_device()
         
     def generate_counterfactuals(
         self,
@@ -57,13 +65,14 @@ class Explainer:
             'model': self.model,
             'data': self.data,
             'eps': robustness_epsilon,
-            'reg_coef': regularization_coefficient
+            'reg_coef': regularization_coefficient,
+            'device': self.device
         }
         
         if method == 'continuous':
             generator = ContinuousGenerator(**gen_kwargs)
-        elif method == 'discrete':
-            generator = DiscreteGenerator(**gen_kwargs)
+        elif method == 'data_supported' or method == 'discrete': # 'discrete' for backward compatibility if needed, or remove
+            generator = DataSupportedGenerator(**gen_kwargs)
         else:
             raise ValueError(f"Unknown method: {method}")
             

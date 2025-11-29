@@ -7,7 +7,7 @@ from sklearn.neighbors import KDTree, BallTree
 
 from .base import EllipsoidGenerator
 
-class DiscreteGenerator(EllipsoidGenerator):
+class DataSupportedGenerator(EllipsoidGenerator):
     """
     Data-supported (Discrete) Counterfactual Generator.
     Selects the best counterfactual from existing data points (candidates)

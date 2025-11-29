@@ -1,3 +1,4 @@
+import torch
 from dataclasses import dataclass
 
 @dataclass
@@ -5,6 +6,17 @@ class AlgorithmConfig:
     """
     Configuration for algorithmic stability and internal constants.
     """
+    # Device Selection
+    # If "auto", selects "cuda" if available, else "cpu"
+    device: str = "auto"
+    
+    @classmethod
+    def get_device(cls) -> str:
+        """Resolves the actual device to use."""
+        if cls.device == "auto":
+            return "cuda" if torch.cuda.is_available() else "cpu"
+        return cls.device
+
     # Numerical stability epsilon (for division, sqrt, log)
     epsilon: float = 1e-9
     

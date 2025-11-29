@@ -27,7 +27,7 @@ pip install -e .
     *   **Categorical Features**: Handles one-hot encoded variables correctly using Gumbel-Softmax optimization.
 *   **Dual Modes**:
     *   **Continuous**: Gradient-based optimization for finding new, optimal counterfactuals.
-    *   **Discrete (Data-Supported)**: Selects the best robust candidates from existing data points.
+    *   **Data-Supported (Discrete)**: Selects the best robust candidates from existing data points.
     *   **Backend Support**: Works seamlessly with both **Scikit-Learn** (Logistic Regression) and **PyTorch** models.
 
 ## Configuration
@@ -181,7 +181,7 @@ Optimizes the input features directly using gradient descent.
 *   **Cons**: May produce synthetic points that don't exist in the data (though usually plausible).
 *   **Best for**: Numerical data, or when flexibility is key.
 
-### Discrete Generator (`method='discrete'`)
+### Data-Supported Generator (`method='data_supported'`)
 Selects the best counterfactual from the existing training data (or a provided candidate set).
 *   **Pros**: Guarantees the counterfactual is a real, observed data point (high plausibility).
 *   **Cons**: Limited by the availability of data points; may not find a solution if the dataset is sparse.
@@ -192,10 +192,9 @@ Selects the best counterfactual from the existing training data (or a provided c
 If you use ElliCE in your research, please cite:
 
 ```bibtex
-@inproceedings{turbal2024ellice,
+@inproceedings{turbal2025ellice,
   title={ElliCE: Efficient and Provably Robust Algorithmic Recourse via the Rashomon Sets},
   author={Turbal, Bohdan and Voitsitska, Iryna and Semenova, Lesia},
-  booktitle={Advances in Neural Information Processing Systems},
-  year={2024}
+  booktitle={The Thirty-ninth Annual Conference on Neural Information Processing Systems}
 }
 ```
