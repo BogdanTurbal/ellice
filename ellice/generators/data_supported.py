@@ -13,25 +13,18 @@ class DataSupportedGenerator(EllipsoidGenerator):
     Selects the best counterfactual from existing data points (candidates)
     that satisfy robustness and actionability constraints.
     """
-    
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._candidates = None
+        self._candidates = {}
         
     def _precompute_candidates(self, target_class: int = 1):
         """
         Identify all robust candidates from the training data.
         """
-        if self._candidates is not None:
-            # Assuming target class doesn't change, or we re-compute if needed.
-            # For simplicity, we recompute if logic is cheap or cache it properly.
-            # The definition of "Robust" depends on target_class. 
-            # If we computed for class 1, it might not be valid for class 0.
-            pass
+        if target_class in self._candidates:
+            return
             
-        # Always recompute or check cache. 
-        # Since this is fast enough for moderate data, let's recompute or check a flag.
-        
         # Use training data as support set
         df = self.data.get_dev_data()
         X_support = df.values.astype(np.float32)
@@ -52,19 +45,14 @@ class DataSupportedGenerator(EllipsoidGenerator):
                 inv_sqrt = self.Q_inv_sqrt
                 u = inv_sqrt @ h_aug.T 
                 norms = u.norm(dim=0, keepdim=True)
+                # Add epsilon to avoid division by zero
                 u_norm = u / (norms + 1e-9)
                 direction = (inv_sqrt @ u_norm).T
                 
                 term1 = torch.matmul(h_aug, self.omega_c).squeeze()
-                term2 = (h_aug * direction).sum(dim=1) 
                 
-                # term2 calculation above is approximate to original code logic
-                # Let's use exact formula: robust_logit = term1 - ||Q^{-1/2} h||
-                # term2 above is effectively ||Q^{-1/2} h||?
-                # direction = Q^{-1/2} (Q^{-1/2} h / ||...||)
-                # h^T direction = h^T Q^{-1} h / ||...||
-                # This matches logic if computed correctly. 
-                # Simpler: term2 = norms.squeeze()
+                # Exact calculation: robust_logit = term1 - ||Q^{-1/2} h||
+                # norms already holds ||Q^{-1/2} h||
                 
                 term2_exact = norms.squeeze()
                 
@@ -77,7 +65,7 @@ class DataSupportedGenerator(EllipsoidGenerator):
                 
                 robust_indices.extend((is_robust.cpu().numpy()).nonzero()[0] + i)
                 
-        self._candidates = df.iloc[robust_indices].reset_index(drop=True)
+        self._candidates[target_class] = df.iloc[robust_indices].reset_index(drop=True)
 
     def generate(
         self, 
@@ -87,16 +75,33 @@ class DataSupportedGenerator(EllipsoidGenerator):
         permitted_range: Optional[Dict[str, List[float]]] = None,
         one_way_change: Optional[Dict[str, str]] = None,
         target_class: int = 1,
+        search_mode: str = 'filtering', # 'filtering', 'kdtree', 'ball_tree'
+        sparsity: bool = False,
         **kwargs
     ) -> pd.DataFrame:
         
+        # Validate search_mode and sparsity combination FIRST
+        if search_mode == 'filtering':
+            pass # Valid for both sparsity=True/False
+        elif search_mode == 'kdtree':
+            if sparsity:
+                print(f"Error generating CF for index {kwargs.get('original_index', 'unknown')}: search_mode='kdtree' does not support sparsity=True. Use 'ball_tree' or 'filtering'.")
+                raise ValueError("search_mode='kdtree' does not support sparsity=True. Use 'ball_tree' or 'filtering'.")
+        elif search_mode == 'ball_tree':
+            if not sparsity:
+                print(f"Error generating CF for index {kwargs.get('original_index', 'unknown')}: search_mode='ball_tree' requires sparsity=True.")
+                raise ValueError("search_mode='ball_tree' requires sparsity=True.")
+        else:
+            raise ValueError(f"Unknown search_mode: {search_mode}")
+
         self._precompute_candidates(target_class)
+        candidates_df = self._candidates[target_class]
         
-        if self._candidates is None or self._candidates.empty:
+        if candidates_df is None or candidates_df.empty:
             print("No robust candidates found in the data support set.")
             return pd.DataFrame()
             
-        valid_candidates = self._candidates.copy()
+        valid_candidates = candidates_df.copy()
         
         # 1. Immutable Features
         if features_to_vary is not None and features_to_vary != 'all':
@@ -124,11 +129,59 @@ class DataSupportedGenerator(EllipsoidGenerator):
             print("No candidates satisfy actionability constraints.")
             return pd.DataFrame()
 
-        # Find nearest neighbors
-        query_vals = query_instance.values
-        dists = np.abs(valid_candidates.values - query_vals).sum(axis=1)
+        # If no restrictions are specified (or even if they are), use search mode logic
+        # The logic above already filters candidates. 
+        # If search_mode is 'kdtree' or 'ball_tree', we build the index on valid_candidates.
         
-        sorted_idx = np.argsort(dists)
-        best_indices = sorted_idx[:k]
+        query_vals = query_instance.values.reshape(1, -1)
+        candidate_vals = valid_candidates.values
+        # Validation moved to start of method
+        
+        if search_mode == 'kdtree' and not sparsity:
+            # Standard mode: K-d Tree on L2 distance
+            # Only works if features are reasonable for L2 (standardized)
+            tree = KDTree(candidate_vals)
+            dist, ind = tree.query(query_vals, k=min(k, len(valid_candidates)))
+            best_indices = ind[0]
+            
+        elif search_mode == 'ball_tree' and sparsity:
+            # Sparsity mode: Ball Tree with custom metric
+            # d(x, y) = C * Hamming(x, y) + L1(x, y)
+            
+            # Note: We prefer using sklearn's BallTree with a custom metric for research fidelity,
+            # even if it's slower in pure Python than brute force.
+            
+            C = 100.0 # Large constant from paper
+            
+            def sparsity_metric(x, y):
+                # x, y are 1D arrays
+                diffs = np.abs(x - y)
+                # Use tolerance for float equality
+                hamming = (diffs > 1e-5).sum()
+                l1 = diffs.sum()
+                return C * hamming + l1
+
+            # Build BallTree with custom metric
+            # Note: This might be slow for large datasets
+            tree = BallTree(candidate_vals, metric='pyfunc', func=sparsity_metric)
+            dist, ind = tree.query(query_vals, k=min(k, len(valid_candidates)))
+            best_indices = ind[0]
+            
+        elif sparsity:
+             # Sparsity requested but search_mode='filtering' (default)
+             # Use brute force with sparsity metric
+            C = 100.0
+            diffs = np.abs(candidate_vals - query_vals)
+            hamming = (diffs > 1e-5).sum(axis=1)
+            l1 = diffs.sum(axis=1)
+            scores = C * hamming + l1
+            sorted_idx = np.argsort(scores)
+            best_indices = sorted_idx[:k]
+
+        else:
+            # Default: Filtering / Brute Force L2 (Standard Mode)
+            dists = np.sqrt(np.sum((candidate_vals - query_vals)**2, axis=1))
+            sorted_idx = np.argsort(dists)
+            best_indices = sorted_idx[:k]
         
         return valid_candidates.iloc[best_indices]

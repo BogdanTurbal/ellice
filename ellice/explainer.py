@@ -6,6 +6,7 @@ from .models import load_model
 from .data import Data
 from .generators.data_supported import DataSupportedGenerator
 from .generators.continuous import ContinuousGenerator
+from .generators.sparse_continuous import SparseContinuousGenerator
 from .configs import AlgorithmConfig
 
 class Explainer:
@@ -41,6 +42,8 @@ class Explainer:
         one_hot_groups: Optional[List[List[str]]] = None,
         robustness_epsilon: float = 0.01,
         regularization_coefficient: float = 1e-4,
+        sparsity: bool = False,
+        search_mode: str = 'filtering',
         optimization_params: Optional[Dict[str, Any]] = None,
         target_class: int = 1,
         return_probs: bool = False,
@@ -69,13 +72,6 @@ class Explainer:
             'device': self.device
         }
         
-        if method == 'continuous':
-            generator = ContinuousGenerator(**gen_kwargs)
-        elif method == 'data_supported' or method == 'discrete': # 'discrete' for backward compatibility if needed, or remove
-            generator = DataSupportedGenerator(**gen_kwargs)
-        else:
-            raise ValueError(f"Unknown method: {method}")
-            
         # Generate
         results = []
         opt_params = optimization_params or {}
@@ -83,6 +79,19 @@ class Explainer:
         # Pass progress_bar via opt_params if supported by generator
         if method == 'continuous':
             opt_params['progress_bar'] = progress_bar
+        
+        if method == 'continuous':
+            if sparsity:
+                generator = SparseContinuousGenerator(**gen_kwargs)
+            else:
+                generator = ContinuousGenerator(**gen_kwargs)
+        elif method == 'data_supported' or method == 'discrete': # 'discrete' for backward compatibility
+            generator = DataSupportedGenerator(**gen_kwargs)
+            # Pass sparsity and search_mode flags to generate method via opt_params
+            opt_params['sparsity'] = sparsity
+            opt_params['search_mode'] = search_mode
+        else:
+            raise ValueError(f"Unknown method: {method}")
         
         for idx, row in df.iterrows():
             try:
@@ -116,9 +125,12 @@ class Explainer:
                         
                     results.append(cf)
             except Exception as e:
+                # Add more context to error
                 print(f"Error generating CF for index {idx}: {e}")
+                import traceback
+                traceback.print_exc()
                 # Continue? or Raise?
-                continue
+                raise e
             
         if not results:
             return pd.DataFrame()

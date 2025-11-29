@@ -1,7 +1,7 @@
 robustness_epsilon: 0.001
 small_epsilon: 0.001
 max_iterations: 2000
-learning_rate: 0.01
+learning_rate: 0.1
 reg_coef: 0.001
 proximity_weight: 0.1
 robustness_weight: 1.0

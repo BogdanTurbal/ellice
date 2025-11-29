@@ -1,3 +1,2 @@
-2025-11-28 23:37:55 [INFO] NumExpr defaulting to 14 threads.
-2025-11-28 23:37:56 [INFO] Sklearn Model - Train Acc: 0.8047, Test Acc: 0.7945
-2025-11-28 23:37:56 [INFO] PyTorch Model (Random) - Test Acc: 0.3488
+2025-11-29 01:25:52 [INFO] Sklearn Model - Train Acc: 0.8053, Test Acc: 0.7953
+2025-11-29 01:25:52 [INFO] PyTorch Model (Random) - Test Acc: 0.9008

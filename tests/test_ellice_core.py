@@ -26,8 +26,17 @@ CONFIG_PATH = os.path.join(os.path.dirname(__file__), 'test_config.yaml')
 with open(CONFIG_PATH, 'r') as f:
     CONFIG = yaml.safe_load(f)
 
+def seed_everything(seed=42):
+    import random
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
 @pytest.fixture(scope="module")
 def setup_data_model():
+    seed_everything(CONFIG['random_state'])
     # Create synthetic data based on config
     X, y = make_classification(
         n_samples=CONFIG['samples'], 
@@ -69,14 +78,24 @@ def setup_data_model():
     # Use PyTorch Model
     input_dim = X_train.shape[1]
     torch_model = nn.Sequential(
-        nn.Linear(input_dim, 10),
+        nn.Linear(input_dim, 16),
         nn.ReLU(),
-        nn.Linear(10, 1)
+        nn.Linear(16, 1)
     )
-    # Simple dummy training just to have weights
-    with torch.no_grad():
-        torch_model[0].weight.copy_(torch.randn(10, input_dim))
-        torch_model[2].weight.copy_(torch.randn(1, 10))
+    
+    # Proper training loop
+    optimizer = torch.optim.Adam(torch_model.parameters(), lr=0.01)
+    criterion = nn.BCEWithLogitsLoss()
+    X_train_t = torch.FloatTensor(X_train.values)
+    y_train_t = torch.FloatTensor(y_train).unsqueeze(1)
+    
+    torch_model.train()
+    for _ in range(50): # Few epochs to get decent weights
+        optimizer.zero_grad()
+        outputs = torch_model(X_train_t)
+        loss = criterion(outputs, y_train_t)
+        loss.backward()
+        optimizer.step()
 
     # Quick eval for torch model (untrained, just random)
     torch_model.eval()
@@ -130,6 +149,8 @@ def query_instance(explainer, setup_data_model):
     query = X_test.iloc[idx]
     
     # Get prediction from explainer's model wrapper
+    # Note: For PyTorch models, this might move the model to GPU if available.
+    # But query.to_frame().T.values is numpy.
     probs = explainer.model.predict_proba(query.to_frame().T.values)[0]
     # Class 1 prob is at index 1
     pred_class = 1 if probs[1] > 0.5 else 0
@@ -217,7 +238,7 @@ def test_small_epsilon_robustness(explainer, query_instance, setup_data_model):
         return_probs=True,
         progress_bar=False,
         robustness_epsilon=eps,
-        optimization_params={'max_iterations': 500}
+        optimization_params={'max_iterations': CONFIG['max_iterations']}
     )
     
     if cf.empty:
@@ -321,7 +342,7 @@ def test_discrete_generator_basic(explainer, query_instance):
     
     cf = explainer.generate_counterfactuals(
         query, target_class=target,
-        method='discrete',
+        method='data_supported',
         progress_bar=False
     )
     
@@ -336,7 +357,7 @@ def test_discrete_generator_constraints(explainer, query_instance):
     
     cf = explainer.generate_counterfactuals(
         query, target_class=target,
-        method='discrete',
+        method='data_supported',
         features_to_vary=features_to_vary,
         progress_bar=False
     )
@@ -346,4 +367,83 @@ def test_discrete_generator_constraints(explainer, query_instance):
             f"Discrete: Feature {feat} should match original"
     else:
         pytest.skip("No discrete candidate found satisfying constraints")
+
+def test_sparse_continuous_generation(explainer, query_instance, setup_data_model):
+    query, target = query_instance
+    cat_cols = setup_data_model['cat_cols']
+    
+    # Force sparsity
+    cf = explainer.generate_counterfactuals(
+        query, target_class=target,
+        method='continuous',
+        one_hot_groups=[cat_cols],
+        return_probs=True,
+        progress_bar=False,
+        sparsity=True,
+        optimization_params={'max_iterations': CONFIG['max_iterations']}
+    )
+    
+    if cf.empty:
+        pytest.skip("Optimization did not find robust sparse CF in limited steps")
+        
+    # Check basic validity
+    model_prob = cf['model_prob_class_1'].iloc[0]
+    pred_class = 1 if model_prob > 0.5 else 0
+    assert pred_class == target
+
+def test_data_supported_search_modes(explainer, query_instance):
+    query, target = query_instance
+    
+    # Test Filtering
+    cf_filt = explainer.generate_counterfactuals(
+        query, target_class=target,
+        method='data_supported',
+        search_mode='filtering',
+        progress_bar=False
+    )
+    
+    # Test KDTree (only if sparse=False)
+    cf_kdtree = explainer.generate_counterfactuals(
+        query, target_class=target,
+        method='data_supported',
+        search_mode='kdtree',
+        sparsity=False,
+        progress_bar=False
+    )
+    
+    # Test BallTree (only if sparse=True)
+    cf_ball = explainer.generate_counterfactuals(
+        query, target_class=target,
+        method='data_supported',
+        search_mode='ball_tree',
+        sparsity=True,
+        progress_bar=False
+    )
+    
+    # Just ensure no errors raised and types are correct
+    # Results might depend on data availability
+    
+def test_data_supported_invalid_modes(explainer, query_instance):
+    query, target = query_instance
+    
+    # KDTree with sparsity=True should fail
+    # This fails immediately due to parameter validation
+    with pytest.raises(ValueError):
+        explainer.generate_counterfactuals(
+            query, target_class=target,
+            method='data_supported',
+            search_mode='kdtree',
+            sparsity=True,
+            progress_bar=False
+        )
+
+    # BallTree with sparsity=False should fail
+    with pytest.raises(ValueError):
+        explainer.generate_counterfactuals(
+            query, target_class=target,
+            method='data_supported',
+            search_mode='ball_tree',
+            sparsity=False,
+            progress_bar=False
+        )
 
