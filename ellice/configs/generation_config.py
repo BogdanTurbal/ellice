@@ -7,7 +7,7 @@ class GenerationConfig:
     """
     # Optimization
     learning_rate: float = 0.1
-    max_iterations: int = 100
+    max_iterations: int = 1000
     patience: int = 50
     
     # Weights

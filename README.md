@@ -1,6 +1,22 @@
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![NeurIPS 2025](https://img.shields.io/badge/NeurIPS_2025-Spotlight-red)](https://neurips.cc/virtual/2025/loc/san-diego/poster/118970)
+
 # ElliCE: Efficient and Provably Robust Algorithmic Recourse via the Rashomon Sets
 
-ElliCE provides robust counterfactual explanations that remain valid across the set of all nearly-optimal models (the Rashomon set). By optimizing over an ellipsoidal approximation of this set, ElliCE ensures that the recommended recourse actions are stable even if the underlying model is retrained or updated.
+**ellice** is an efficient library for generating provably robust counterfactual explanations using ElliCE method. It ensures that recommended recourse actions remain valid across the set of all nearly-optimal models (the Rashomon set) using an ellipsoidal approximation, providing stability even if the underlying model is retrained or updated.
+
+## Table of Contents
+
+- [Installation](#installation)
+- [Features](#features)
+- [Configuration](#configuration)
+- [Quick Start](#quick-start)
+- [Advanced Usage: Actionability Constraints](#advanced-usage-actionability-constraints
+)
+- [Generators](#generators)
+- [Custom Backend Models](#custom-backend-models)
+- [License](#license)
+- [Citation](#citation)
 
 ## Installation
 
@@ -30,7 +46,7 @@ pip install -e .
     *   **Data-Supported**: Selects the best robust candidates from existing data points.
     *   **Sparsity Support**: Find counterfactuals with minimal feature changes (available for both modes).
 *   **Backend Support**: Works seamlessly with both **Scikit-Learn** (Logistic Regression) and **PyTorch** models.
-*   **Device Agnostic**: Automatic GPU/CPU detection with explicit device control (CUDA/MPS/CPU).
+*   **Device Agnostic**: Automatic GPU/CPU detection with explicit device control (CUDA/CPU).
 *   **Deterministic Execution**: Reproducible results with proper random seeding.
 
 ## Configuration
@@ -40,7 +56,7 @@ ElliCE uses a robust configuration system for advanced control. The configuratio
 ### GenerationConfig
 Controls default parameters for counterfactual generation:
 - `learning_rate`: Optimization learning rate (default: 0.1)
-- `max_iterations`: Maximum optimization iterations (default: 100)
+- `max_iterations`: Maximum optimization iterations (default: 1000)
 - `patience`: Early stopping patience (default: 50)
 - `robustness_weight`: Weight for robustness loss (default: 1.0)
 - `proximity_weight`: Weight for proximity loss (default: 0.0)
@@ -54,7 +70,7 @@ Controls algorithmic stability and internal constants:
 - `clip_grad_norm`: Gradient clipping threshold (default: 1.0)
 - `gumbel_epsilon`: Gumbel-Softmax epsilon (default: 1e-10)
 - `sparsity_constant`: Constant C in sparsity metric (C × Hamming + L1) (default: 100.0)
-- `device`: Device selection - "auto" (default), "cpu", "cuda", or "mps"
+- `device`: Device selection - "auto" (default), "cpu" or "cuda"
 
 ```python
 from ellice.ellice.configs import GenerationConfig, AlgorithmConfig
@@ -201,9 +217,8 @@ cf = exp.generate_counterfactuals(
 
 ### Continuous Generator (`method='continuous'`)
 Optimizes the input features directly using gradient descent.
-*   **Pros**: Finds the mathematically optimal counterfactual closest to the query.
+*   **Pros**: Finds the counterfactual closest to the query.
 *   **Cons**: May produce synthetic points that don't exist in the data (though usually plausible).
-*   **Best for**: Numerical data, or when flexibility is key.
 
 **Sparsity Support**: Enable `sparsity=True` to find counterfactuals with minimal feature changes using iterative feature selection (Algorithm 3 from the paper).
 
@@ -220,7 +235,6 @@ cf = exp.generate_counterfactuals(
 Selects the best counterfactual from the existing training data (or a provided candidate set).
 *   **Pros**: Guarantees the counterfactual is a real, observed data point (high plausibility).
 *   **Cons**: Limited by the availability of data points; may not find a solution if the dataset is sparse.
-*   **Best for**: Highly constrained domains (e.g., medical) where synthetic examples are risky.
 
 **Search Modes**:
 - `search_mode='filtering'` (default): Brute-force filtering of all candidates. Works with or without sparsity.
