@@ -12,7 +12,7 @@ setup(
         "torch",
         "scikit-learn",
         "pyyaml",
-        "matplotlib",
+        "matplotlib"
     ],
 )
 

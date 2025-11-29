@@ -8,7 +8,7 @@ import time
 
 from tqdm import tqdm
 
-
+from ..configs import AlgorithmConfig, GenerationConfig
 from .base import EllipsoidGenerator
 
 class ContinuousGenerator(EllipsoidGenerator):
@@ -19,33 +19,31 @@ class ContinuousGenerator(EllipsoidGenerator):
     
     def _gumbel_softmax_sample(self, logits: torch.Tensor, tau: float = 1.0) -> torch.Tensor:
         """Sample from Gumbel-Softmax distribution."""
-        gumbel_noise = -torch.log(-torch.log(torch.rand_like(logits) + 1e-10) + 1e-10)
+        gumbel_noise = -torch.log(-torch.log(torch.rand_like(logits) + AlgorithmConfig.gumbel_epsilon) + AlgorithmConfig.gumbel_epsilon)
         y = logits + gumbel_noise
         return F.softmax(y / tau, dim=-1)
 
     def generate(
         self,
         query_instance: pd.Series,
-        learning_rate: float = 0.1,
-        max_iterations: int = 100,
-        robustness_weight: float = 1.0,
-        proximity_weight: float = 0.0,
+        learning_rate: float = GenerationConfig.learning_rate,
+        max_iterations: int = GenerationConfig.max_iterations,
+        robustness_weight: float = GenerationConfig.robustness_weight,
+        proximity_weight: float = GenerationConfig.proximity_weight,
         features_to_vary: Optional[List[str]] = None,
         permitted_range: Optional[Dict[str, List[float]]] = None,
         one_way_change: Optional[Dict[str, str]] = None,
         allowed_values: Optional[Dict[str, List[float]]] = None,
         one_hot_groups: Optional[List[List[str]]] = None,
-        gumbel_temperature: float = 1.0,
+        gumbel_temperature: float = GenerationConfig.gumbel_temperature,
         target_class: int = 1,
-        early_stopping: bool = True,
-        patience: int = 20,
-        progress_bar: bool = True,
-        gradient_mode: str = "min-max", # "min-max" or "full_grad"
-        feature_weights: Optional[Dict[str, float]] = None, # Weight per feature
-        group_weights: Optional[Dict[str, float]] = None, # Weight per one-hot group (key can be first feature name or index?)
-        # Let's use index or name of first feature. Better: accept feature_weights where keys are feature names.
-        # For groups, if all features in group have same weight, we can just use that.
-        allowed_ranges_closest_grad: bool = False, 
+        early_stopping: bool = GenerationConfig.early_stopping,
+        patience: int = GenerationConfig.patience,
+        progress_bar: bool = GenerationConfig.progress_bar,
+        gradient_mode: str = GenerationConfig.gradient_mode, 
+        feature_weights: Optional[Dict[str, float]] = None,
+        group_weights: Optional[Dict[str, float]] = None,
+        allowed_ranges_closest_grad: bool = GenerationConfig.allowed_ranges_closest_grad, 
         **kwargs
     ) -> pd.DataFrame:
         
@@ -83,7 +81,7 @@ class ContinuousGenerator(EllipsoidGenerator):
                     feat_name = feature_names[idx]
                     # If not explicitly overridden by feature_weights
                     if feature_weights is None or feat_name not in feature_weights:
-                        loss_weights[idx] = 0.5
+                        loss_weights[idx] = GenerationConfig.default_group_weight
         
         # Handle One-Hot Groups
         if one_hot_groups:
@@ -157,6 +155,31 @@ class ContinuousGenerator(EllipsoidGenerator):
                 # If ALL features in group are NOT in features_to_vary, then freeze
                 if all(name not in features_to_vary for name in group_names):
                     frozen_groups_cat.append(i)
+        elif features_to_vary == 'all':
+            pass # Nothing frozen by default
+        elif GenerationConfig.features_to_vary:
+             # Use default config if provided
+             features_to_vary = GenerationConfig.features_to_vary
+             # Re-run logic (simplified by recursion or just duplicate for now to avoid complexity)
+             for i, global_idx in enumerate(continuous_indices):
+                feat_name = feature_names[global_idx]
+                if feat_name not in features_to_vary:
+                    frozen_indices_cont.append(i)
+             for i, group_indices in enumerate(one_hot_indices):
+                group_names = [feature_names[idx] for idx in group_indices]
+                if all(name not in features_to_vary for name in group_names):
+                    frozen_groups_cat.append(i)
+
+        # Merge Runtime and Config constraints
+        # If runtime is None, check config
+        if permitted_range is None and GenerationConfig.permitted_range:
+            permitted_range = GenerationConfig.permitted_range
+            
+        if one_way_change is None and GenerationConfig.one_way_change:
+            one_way_change = GenerationConfig.one_way_change
+
+        if allowed_values is None and GenerationConfig.allowed_values:
+            allowed_values = GenerationConfig.allowed_values
         
         # Pre-compute indices for constraints to speed up loop
         range_constraints_cont = [] # (local_cont_idx, min, max)
@@ -222,28 +245,19 @@ class ContinuousGenerator(EllipsoidGenerator):
             h_flat = self._get_penult_features(x_cf_full)
             bias = torch.ones(h_flat.size(0), 1, device=self.device, dtype=self.dtype)
             h_aug = torch.cat([h_flat, bias], dim=1)
+    
             
-            # 2. Compute Robust Logit
-            if gradient_mode == "full_grad":
-                u = inv_sqrt @ h_aug.T
-                term2 = torch.norm(u, p=2)
-                term1 = torch.matmul(h_aug, self.omega_c)
+            # Always use Min-Max Strategy (Default)
+            with torch.no_grad():
+                worst_theta = self._compute_worst_model(h_aug)
+            
+            if target_class == 0:
+                u = inv_sqrt @ h_aug.T 
+                norm_u = u.norm()
+                direction = inv_sqrt @ u / (norm_u + AlgorithmConfig.epsilon)
+                worst_theta = self.omega_c + direction.squeeze()
                 
-                robust_logit = term1 - term2
-                if target_class == 0:
-                    robust_logit = term1 + term2
-                    
-            else: # "min-max" default
-                with torch.no_grad():
-                    worst_theta = self._compute_worst_model(h_aug)
-                    
-                if target_class == 0:
-                    u = inv_sqrt @ h_aug.T 
-                    norm_u = u.norm()
-                    direction = inv_sqrt @ u / (norm_u + 1e-9)
-                    worst_theta = self.omega_c + direction.squeeze()
-                    
-                robust_logit = torch.matmul(h_aug, worst_theta)
+            robust_logit = torch.matmul(h_aug, worst_theta)
             
             # Loss Logic
             if target_class == 1:
@@ -275,7 +289,7 @@ class ContinuousGenerator(EllipsoidGenerator):
             # So we need sqrt( sum( w_i * diff_i^2 ) ).
             
             weighted_diff_sq = loss_weights * (diff ** 2)
-            loss_prox = torch.sqrt(torch.sum(weighted_diff_sq))
+            loss_prox = torch.sqrt(torch.sum(weighted_diff_sq) + AlgorithmConfig.epsilon)
             
             # Total Loss
             loss = robustness_weight * loss_robust + proximity_weight * loss_prox
@@ -363,7 +377,7 @@ class ContinuousGenerator(EllipsoidGenerator):
                             
                         d_left = (val - v_left).abs()
                         d_right = (v_right - val).abs()
-                        total_d = d_left + d_right + 1e-9
+                        total_d = d_left + d_right + AlgorithmConfig.epsilon
                         p_left = 1 - (d_left / total_d)
                         p_right = 1 - (d_right / total_d)
                         sum_p = p_left + p_right
@@ -409,7 +423,7 @@ class ContinuousGenerator(EllipsoidGenerator):
                             # Analytic worst case
                             u_b = inv_sqrt @ h_aug_batch.T
                             norms_b = u_b.norm(dim=0)
-                            dirs_b = (inv_sqrt @ u_b).T / (norms_b.unsqueeze(1) + 1e-9)
+                            dirs_b = (inv_sqrt @ u_b).T / (norms_b.unsqueeze(1) + AlgorithmConfig.epsilon)
                             if target_class == 0:
                                 worst_thetas = self.omega_c + dirs_b
                             else:
@@ -449,6 +463,9 @@ class ContinuousGenerator(EllipsoidGenerator):
                         
                         # Assign to main gradient
                         x_cont.grad[idx] = new_grad
+
+            # Clip gradients for stability (helps with unscaled data)
+            torch.nn.utils.clip_grad_norm_(params, max_norm=AlgorithmConfig.clip_grad_norm)
 
             optimizer.step()
 
@@ -540,6 +557,12 @@ class ContinuousGenerator(EllipsoidGenerator):
                     })
 
                 # Save best
+                # If robust_logit is > 0 (i.e., we crossed the boundary), we prefer the one with best proximity?
+                # Or we maximize robust_logit?
+                # User said: "when robust logit becames > 0 => stop the optimization"
+                
+                # Update Best logic
+                # We still track the max robust logit found so far, but if we cross 0, we might want to stop.
                 if metric > best_robust_logit:
                     best_robust_logit = metric
                     best_x = x_val_full.clone().detach()
@@ -547,9 +570,25 @@ class ContinuousGenerator(EllipsoidGenerator):
                 else:
                     no_improve_count += 1
 
+                # Force saving if not robust yet but better than nothing
+                # Or maybe we should always return the best_x found?
+                # The current logic updates best_x only if metric > best_robust_logit
+                # This is correct for maximizing robustness.
+
                 # Early Stopping
+                # 1. Standard patience
                 if early_stopping and no_improve_count >= patience:
                     if progress_bar:
+                        iterator.close()
+                    break
+                    
+                # 2. Stop if robust (User request)
+                # metric corresponds to robust_logit (or -robust_logit for class 0)
+                # If target=1, metric = robust_logit. If metric > 0, we are robust.
+                # If target=0, metric = -robust_logit. If metric > 0, robust_logit < 0, we are robust.
+                if metric > 0:
+                    if progress_bar:
+                        #iterator.write(f"Robust solution found (Logit: {metric:.4f})! Stopping early.")
                         iterator.close()
                     break
 

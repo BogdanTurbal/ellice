@@ -1,0 +1,16 @@
+robustness_epsilon: 0.001
+small_epsilon: 0.001
+max_iterations: 2000
+learning_rate: 0.01
+reg_coef: 0.001
+proximity_weight: 0.1
+robustness_weight: 1.0
+float_tolerance: 1.0e-4
+samples: 20000
+features: 10
+informative: 5
+redundant: 5
+class_sep: 1.0
+random_state: 42
+test_size: 0.2
+

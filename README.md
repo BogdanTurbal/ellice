@@ -5,7 +5,15 @@ ElliCE provides robust counterfactual explanations that remain valid across the 
 ## Installation
 
 ```bash
-pip install .
+pip install ellice
+```
+
+Or for development:
+
+```bash
+git clone https://github.com/your-repo/ellice.git
+cd ellice
+pip install -e .
 ```
 
 ## Features
@@ -15,11 +23,25 @@ pip install .
     *   **Immutable Features**: Freeze features that cannot be changed (e.g., `Age`, `Race`).
     *   **Range Constraints**: Restrict changes to feasible intervals (e.g., `Salary` within valid brackets).
     *   **One-Way Changes**: Enforce monotonic changes (e.g., `Experience` can only increase).
+    *   **Allowed Values**: Restrict ordinal/discrete features to specific valid values (e.g., `Education Level` $\in \{1, 2, 3, 4\}$).
     *   **Categorical Features**: Handles one-hot encoded variables correctly using Gumbel-Softmax optimization.
 *   **Dual Modes**:
     *   **Continuous**: Gradient-based optimization for finding new, optimal counterfactuals.
     *   **Discrete (Data-Supported)**: Selects the best robust candidates from existing data points.
-*   **Backend Support**: Works seamlessly with both **Scikit-Learn** (Logistic Regression) and **PyTorch** models.
+    *   **Backend Support**: Works seamlessly with both **Scikit-Learn** (Logistic Regression) and **PyTorch** models.
+
+## Configuration
+
+ElliCE uses a robust configuration system for advanced control.
+
+```python
+from ellice.ellice.configs import GenerationConfig, AlgorithmConfig
+
+# Customize default behavior globally if needed
+GenerationConfig.patience = 100
+GenerationConfig.learning_rate = 0.05
+AlgorithmConfig.epsilon = 1e-8
+```
 
 ## Quick Start
 
@@ -115,6 +137,38 @@ cf = exp.generate_counterfactuals(
     method='continuous',
     permitted_range=ranges,
     one_way_change=one_way,
+    ...
+)
+```
+
+### 4. Allowed Values (Ordinal Features)
+
+Restrict specific features to a discrete set of valid values (e.g., integers for years of experience).
+
+```python
+# 'Education' can only be 1, 2, 3, or 4
+allowed = {'Education': [1.0, 2.0, 3.0, 4.0]}
+
+cf = exp.generate_counterfactuals(
+    query,
+    method='continuous',
+    allowed_values=allowed,
+    ...
+)
+```
+
+### 5. Custom Weighting
+
+You can assign different importance weights to features or groups in the proximity loss function.
+
+```python
+# Make changing 'Salary' twice as expensive
+feature_weights = {'Salary': 2.0}
+
+cf = exp.generate_counterfactuals(
+    query,
+    method='continuous',
+    feature_weights=feature_weights,
     ...
 )
 ```
