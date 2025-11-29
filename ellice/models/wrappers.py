@@ -160,7 +160,18 @@ class SklearnModel(ModelWrapper):
             d = self.model.decision_function(X)
             return 1 / (1 + np.exp(-d))
 
-def load_model(model, backend='auto') -> ModelWrapper:
+def load_model(model, backend='auto', backend_model_class=None) -> ModelWrapper:
+    """
+    Load a model wrapper.
+    
+    Args:
+        model: The model to wrap
+        backend: Backend type ('auto', 'pytorch', 'sklearn', 'custom')
+        backend_model_class: Custom ModelWrapper class (required if backend='custom')
+    
+    Returns:
+        ModelWrapper instance
+    """
     if backend == 'auto':
         if isinstance(model, nn.Module):
             return PyTorchModel(model)
@@ -170,6 +181,12 @@ def load_model(model, backend='auto') -> ModelWrapper:
         return PyTorchModel(model)
     elif backend == 'sklearn':
         return SklearnModel(model)
+    elif backend == 'custom':
+        if backend_model_class is None:
+            raise ValueError("backend_model_class must be provided when backend='custom'")
+        if not issubclass(backend_model_class, ModelWrapper):
+            raise ValueError("backend_model_class must be a subclass of ModelWrapper")
+        return backend_model_class(model)
     else:
-        raise ValueError(f"Unknown backend: {backend}")
+        raise ValueError(f"Unknown backend: {backend}. Supported: 'auto', 'pytorch', 'sklearn', 'custom'")
 

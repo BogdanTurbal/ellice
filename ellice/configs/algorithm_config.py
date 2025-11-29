@@ -32,4 +32,7 @@ class AlgorithmConfig:
     
     # Sigmoid threshold for safe computation
     sigmoid_threshold: float = 20.0
+    
+    # Sparsity metric constant (C in C * Hamming + L1 distance)
+    sparsity_constant: float = 100.0
 

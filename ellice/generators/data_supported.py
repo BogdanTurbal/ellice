@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from sklearn.neighbors import KDTree, BallTree
 
 from .base import EllipsoidGenerator
+from ..configs import AlgorithmConfig
 
 class DataSupportedGenerator(EllipsoidGenerator):
     """
@@ -151,7 +152,7 @@ class DataSupportedGenerator(EllipsoidGenerator):
             # Note: We prefer using sklearn's BallTree with a custom metric for research fidelity,
             # even if it's slower in pure Python than brute force.
             
-            C = 100.0 # Large constant from paper
+            C = AlgorithmConfig.sparsity_constant
             
             def sparsity_metric(x, y):
                 # x, y are 1D arrays
@@ -170,7 +171,7 @@ class DataSupportedGenerator(EllipsoidGenerator):
         elif sparsity:
              # Sparsity requested but search_mode='filtering' (default)
              # Use brute force with sparsity metric
-            C = 100.0
+            C = AlgorithmConfig.sparsity_constant
             diffs = np.abs(candidate_vals - query_vals)
             hamming = (diffs > 1e-5).sum(axis=1)
             l1 = diffs.sum(axis=1)

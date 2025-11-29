@@ -53,6 +53,7 @@ Controls algorithmic stability and internal constants:
 - `epsilon`: Numerical stability epsilon (default: 1e-9)
 - `clip_grad_norm`: Gradient clipping threshold (default: 1.0)
 - `gumbel_epsilon`: Gumbel-Softmax epsilon (default: 1e-10)
+- `sparsity_constant`: Constant C in sparsity metric (C × Hamming + L1) (default: 100.0)
 - `device`: Device selection - "auto" (default), "cpu", "cuda", or "mps"
 
 ```python
@@ -253,6 +254,122 @@ cf = exp.generate_counterfactuals(
     sparsity=True,
     ...
 )
+```
+
+## Custom Backend Models
+
+ElliCE supports custom model wrappers for complex architectures or non-standard models. To use a custom backend:
+
+### 1. Create a Custom ModelWrapper
+
+Your custom class must inherit from `ModelWrapper` and implement the required abstract methods:
+
+```python
+from ellice.ellice.models.wrappers import ModelWrapper
+import torch
+import torch.nn as nn
+import numpy as np
+from typing import Tuple
+
+class CustomModelWrapper(ModelWrapper):
+    """Custom wrapper for your specific model architecture."""
+    
+    def __init__(self, model):
+        super().__init__(model, backend='custom')
+        self.model.eval()  # Set to evaluation mode
+    
+    def get_torch_model(self) -> nn.Module:
+        """Return the underlying PyTorch model."""
+        return self.model
+    
+    def split_model(self) -> Tuple[nn.Module, torch.Tensor]:
+        """
+        Split model into penultimate feature extractor and last layer.
+        
+        Returns:
+            penult: nn.Module that extracts penultimate features
+            theta: torch.Tensor of flattened (weights, bias) from last layer
+        """
+        # Example: For a model with structure [features -> hidden -> output]
+        # Extract everything except the last layer as penult
+        penult = nn.Sequential(*list(self.model.children())[:-1])
+        
+        # Get last layer parameters
+        last_layer = list(self.model.children())[-1]
+        weight = last_layer.weight.detach().view(-1)
+        bias = last_layer.bias.detach()
+        theta = torch.cat([weight, bias])
+        
+        return penult, theta
+    
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        """Return probability predictions for input X."""
+        device = next(self.model.parameters()).device
+        X_tensor = torch.from_numpy(X).float().to(device)
+        
+        with torch.no_grad():
+            logits = self.model(X_tensor)
+            if logits.shape[1] == 1:
+                # Binary classification
+                probs_1 = torch.sigmoid(logits)
+                probs_0 = 1 - probs_1
+                probs = torch.cat([probs_0, probs_1], dim=1)
+            else:
+                # Multi-class classification
+                probs = torch.softmax(logits, dim=1)
+        
+        return probs.cpu().numpy()
+```
+
+### 2. Use Custom Backend in Explainer
+
+```python
+# Initialize with custom backend
+exp = ellice.Explainer(
+    model=your_custom_model,
+    data=data,
+    backend='custom',
+    backend_model_class=CustomModelWrapper
+)
+
+# Generate counterfactuals as usual
+cf = exp.generate_counterfactuals(query, ...)
+```
+
+### Important Notes
+
+- **Model Structure**: Your model must have a linear last layer (for binary classification, output size 1; for multi-class, output size = number of classes).
+- **Penultimate Features**: The `split_model()` method must correctly identify the penultimate layer. For complex architectures (e.g., ResNet, Transformer), you may need custom logic.
+- **Device Handling**: Ensure your wrapper handles device placement correctly (CPU/CUDA/MPS).
+- **Binary vs Multi-class**: The `predict_proba` method should handle both binary (1 output) and multi-class (N outputs) cases.
+
+### Example: Complex Architecture
+
+For models with non-sequential structures, you might need to use hooks or custom forward passes:
+
+```python
+class ComplexModelWrapper(ModelWrapper):
+    def split_model(self) -> Tuple[nn.Module, torch.Tensor]:
+        # For a model with skip connections or complex structure,
+        # you might need to create a custom feature extractor
+        class FeatureExtractor(nn.Module):
+            def __init__(self, original_model):
+                super().__init__()
+                self.backbone = original_model.backbone
+                self.hidden = original_model.hidden_layers
+            
+            def forward(self, x):
+                x = self.backbone(x)
+                x = self.hidden(x)
+                return x
+        
+        penult = FeatureExtractor(self.model)
+        last_layer = self.model.classifier  # Assuming classifier is the last layer
+        weight = last_layer.weight.detach().view(-1)
+        bias = last_layer.bias.detach()
+        theta = torch.cat([weight, bias])
+        
+        return penult, theta
 ```
 
 ## Reproducibility

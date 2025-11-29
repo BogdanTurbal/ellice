@@ -20,6 +20,8 @@ logger = logging.getLogger(__name__)
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import ellice
+# Import ModelWrapper - access through ellice package structure
+from ellice.models.wrappers import ModelWrapper
 
 # Load Config
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), 'test_config.yaml')
@@ -446,4 +448,132 @@ def test_data_supported_invalid_modes(explainer, query_instance):
             sparsity=False,
             progress_bar=False
         )
+
+
+# Custom ModelWrapper for testing
+class CustomTestModelWrapper(ModelWrapper):
+    """Custom ModelWrapper for testing custom backend functionality."""
+    
+    def __init__(self, model):
+        super().__init__(model, backend='custom')
+        self.model.eval()
+    
+    def get_torch_model(self) -> nn.Module:
+        return self.model
+    
+    def split_model(self):
+        """Split model into penultimate and last layer."""
+        # For Sequential models, extract everything except last layer
+        if isinstance(self.model, nn.Sequential):
+            children = list(self.model.children())
+            penult = nn.Sequential(*children[:-1])
+            last_layer = children[-1]
+        else:
+            # Fallback for non-sequential
+            children = list(self.model.children())
+            penult = nn.Sequential(*children[:-1])
+            last_layer = children[-1]
+        
+        # Extract last layer parameters
+        weight = last_layer.weight.detach().view(-1)
+        bias = last_layer.bias.detach()
+        theta = torch.cat([weight, bias])
+        
+        return penult, theta
+    
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        """Return probability predictions."""
+        device = next(self.model.parameters()).device
+        X_tensor = torch.from_numpy(X).float().to(device)
+        
+        with torch.no_grad():
+            logits = self.model(X_tensor)
+            if logits.shape[1] == 1:
+                # Binary classification
+                probs_1 = torch.sigmoid(logits)
+                probs_0 = 1 - probs_1
+                probs = torch.cat([probs_0, probs_1], dim=1)
+            else:
+                # Multi-class classification
+                probs = torch.softmax(logits, dim=1)
+        
+        return probs.cpu().numpy()
+
+
+def test_custom_backend_basic(setup_data_model):
+    """Test that custom backend works with a custom ModelWrapper."""
+    seed_everything(CONFIG['random_state'])
+    
+    # Use the existing trained PyTorch model from setup
+    custom_model = setup_data_model['torch_model']
+    
+    # Create explainer with custom backend
+    exp = ellice.Explainer(
+        model=custom_model,
+        data=setup_data_model['data'],
+        backend='custom',
+        backend_model_class=CustomTestModelWrapper
+    )
+    
+    # Test that the model wrapper is correctly instantiated
+    assert isinstance(exp.model, CustomTestModelWrapper)
+    assert exp.model.backend == 'custom'
+    
+    # Test that we can generate counterfactuals
+    query = setup_data_model['X_test'].iloc[0]
+    
+    # Get prediction to determine target
+    probs = exp.model.predict_proba(query.to_frame().T.values)[0]
+    pred_class = 1 if probs[1] > 0.5 else 0
+    target = 1 - pred_class
+    
+    cf = exp.generate_counterfactuals(
+        query,
+        target_class=target,
+        method='continuous',
+        progress_bar=False,
+        optimization_params={'max_iterations': CONFIG['max_iterations']}
+    )
+    
+    # Should generate a counterfactual (or at least not crash)
+    # If empty, that's okay - just verify no errors
+    assert isinstance(cf, pd.DataFrame)
+
+
+def test_custom_backend_errors(setup_data_model):
+    """Test that custom backend raises appropriate errors."""
+    seed_everything(CONFIG['random_state'])
+    
+    # Use the existing trained PyTorch model from setup
+    custom_model = setup_data_model['torch_model']
+    
+    # Test 1: backend='custom' without backend_model_class should raise ValueError
+    with pytest.raises(ValueError, match="backend_model_class must be provided"):
+        ellice.Explainer(
+            model=custom_model,
+            data=setup_data_model['data'],
+            backend='custom'
+        )
+    
+    # Test 2: backend_model_class that is not a subclass of ModelWrapper should raise ValueError
+    class NotAModelWrapper:
+        pass
+    
+    with pytest.raises(ValueError, match="must be a subclass of ModelWrapper"):
+        ellice.Explainer(
+            model=custom_model,
+            data=setup_data_model['data'],
+            backend='custom',
+            backend_model_class=NotAModelWrapper
+        )
+    
+    # Test 3: Valid custom backend should work
+    exp = ellice.Explainer(
+        model=custom_model,
+        data=setup_data_model['data'],
+        backend='custom',
+        backend_model_class=CustomTestModelWrapper
+    )
+    
+    assert isinstance(exp.model, CustomTestModelWrapper)
 
