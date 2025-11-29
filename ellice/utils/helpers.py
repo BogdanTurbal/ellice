@@ -48,9 +48,21 @@ def compute_ellipsoid(
     
     logits = H_feats @ theta_star.cpu().detach().numpy()
     # Stable sigmoid to avoid overflow
-    p = np.where(logits >= 0, 
-                 1.0 / (1.0 + np.exp(-logits)), 
-                 np.exp(logits) / (1.0 + np.exp(logits)))
+    # np.where evaluates both branches, so if logits is very negative, exp(-logits) overflows in the first branch
+    # even though it's not selected. To fix this, we use masked assignment or scipy.special.expit.
+    
+    p = np.zeros_like(logits)
+    pos = logits >= 0
+    neg = ~pos
+    
+    # 1 / (1 + exp(-z)) for z >= 0
+    if np.any(pos):
+        p[pos] = 1.0 / (1.0 + np.exp(-logits[pos]))
+        
+    # exp(z) / (1 + exp(z)) for z < 0
+    if np.any(neg):
+        exp_z = np.exp(logits[neg])
+        p[neg] = exp_z / (1.0 + exp_z)
     
     # Hessian approximation
     # W = diag(p * (1-p))
