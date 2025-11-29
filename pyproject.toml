@@ -1,0 +1,70 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ellice"
+version = "0.1.0"
+description = "ElliCE: Efficient and Provably Robust Algorithmic Recourse via the Rashomon Sets"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "Bohdan Turbal"},
+]
+keywords = [
+    "counterfactual explanations",
+    "algorithmic recourse",
+    "robustness",
+    "rashomon set",
+    "machine learning",
+    "explainable AI",
+    "XAI"
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+dependencies = [
+    "numpy>=1.20.0",
+    "pandas>=1.3.0",
+    "torch>=1.9.0",
+    "scikit-learn>=0.24.0",
+    "pyyaml>=5.4.0",
+    "tqdm>=4.60.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=3.0.0",
+]
+
+[project.urls]"
+Repository = "https://github.com/BogdanTurbal/ellice"
+
+[tool.setuptools]
+# Automatically find all packages
+packages = {find = {}}
+
+[tool.setuptools.package-data]
+ellice = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+
