@@ -19,9 +19,21 @@ class Explainer:
         model: Any,
         data: Data,
         backend: str = 'auto',
-        device: Optional[str] = None
+        device: Optional[str] = None,
+        backend_model_class: Optional[Any] = None
     ):
-        self.model = load_model(model, backend=backend)
+        """
+        Initialize ElliCE Explainer.
+        
+        Args:
+            model: The trained model (PyTorch nn.Module, sklearn model, or custom)
+            data: ElliCE Data object containing training data
+            backend: Backend type ('auto', 'pytorch', 'sklearn', 'custom')
+            device: Device to use ('auto', 'cpu', 'cuda', 'mps'). If None, uses AlgorithmConfig.get_device()
+            backend_model_class: Custom ModelWrapper class (required if backend='custom')
+                Must be a subclass of ModelWrapper and implement required methods.
+        """
+        self.model = load_model(model, backend=backend, backend_model_class=backend_model_class)
         self.data = data
         
         # Resolve device

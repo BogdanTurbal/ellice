@@ -27,12 +27,34 @@ pip install -e .
     *   **Categorical Features**: Handles one-hot encoded variables correctly using Gumbel-Softmax optimization.
 *   **Dual Modes**:
     *   **Continuous**: Gradient-based optimization for finding new, optimal counterfactuals.
-    *   **Data-Supported (Discrete)**: Selects the best robust candidates from existing data points.
-    *   **Backend Support**: Works seamlessly with both **Scikit-Learn** (Logistic Regression) and **PyTorch** models.
+    *   **Data-Supported**: Selects the best robust candidates from existing data points.
+    *   **Sparsity Support**: Find counterfactuals with minimal feature changes (available for both modes).
+*   **Backend Support**: Works seamlessly with both **Scikit-Learn** (Logistic Regression) and **PyTorch** models.
+*   **Device Agnostic**: Automatic GPU/CPU detection with explicit device control (CUDA/MPS/CPU).
+*   **Deterministic Execution**: Reproducible results with proper random seeding.
 
 ## Configuration
 
-ElliCE uses a robust configuration system for advanced control.
+ElliCE uses a robust configuration system for advanced control. The configuration is split into two classes:
+
+### GenerationConfig
+Controls default parameters for counterfactual generation:
+- `learning_rate`: Optimization learning rate (default: 0.1)
+- `max_iterations`: Maximum optimization iterations (default: 100)
+- `patience`: Early stopping patience (default: 50)
+- `robustness_weight`: Weight for robustness loss (default: 1.0)
+- `proximity_weight`: Weight for proximity loss (default: 0.0)
+- `gumbel_temperature`: Temperature for Gumbel-Softmax (default: 1.0)
+- `early_stopping`: Enable early stopping (default: True)
+- `progress_bar`: Show progress bar (default: True)
+
+### AlgorithmConfig
+Controls algorithmic stability and internal constants:
+- `epsilon`: Numerical stability epsilon (default: 1e-9)
+- `clip_grad_norm`: Gradient clipping threshold (default: 1.0)
+- `gumbel_epsilon`: Gumbel-Softmax epsilon (default: 1e-10)
+- `sparsity_constant`: Constant C in sparsity metric (C × Hamming + L1) (default: 100.0)
+- `device`: Device selection - "auto" (default), "cpu", "cuda", or "mps"
 
 ```python
 from ellice.ellice.configs import GenerationConfig, AlgorithmConfig
@@ -41,6 +63,7 @@ from ellice.ellice.configs import GenerationConfig, AlgorithmConfig
 GenerationConfig.patience = 100
 GenerationConfig.learning_rate = 0.05
 AlgorithmConfig.epsilon = 1e-8
+AlgorithmConfig.device = "cuda"  # Force CUDA, or use "auto" for automatic detection
 ```
 
 ## Quick Start
@@ -68,7 +91,8 @@ data = ellice.Data(dataframe=full_df, target_column='target')
 exp = ellice.Explainer(
     model=clf,
     data=data,
-    backend='sklearn'
+    backend='sklearn',
+    device='auto'  # Automatically selects CUDA if available, else CPU
 )
 
 # 3. Generate Robust Counterfactual
@@ -181,11 +205,193 @@ Optimizes the input features directly using gradient descent.
 *   **Cons**: May produce synthetic points that don't exist in the data (though usually plausible).
 *   **Best for**: Numerical data, or when flexibility is key.
 
+**Sparsity Support**: Enable `sparsity=True` to find counterfactuals with minimal feature changes using iterative feature selection (Algorithm 3 from the paper).
+
+```python
+cf = exp.generate_counterfactuals(
+    query,
+    method='continuous',
+    sparsity=True,  # Find sparse counterfactuals
+    ...
+)
+```
+
 ### Data-Supported Generator (`method='data_supported'`)
 Selects the best counterfactual from the existing training data (or a provided candidate set).
 *   **Pros**: Guarantees the counterfactual is a real, observed data point (high plausibility).
 *   **Cons**: Limited by the availability of data points; may not find a solution if the dataset is sparse.
 *   **Best for**: Highly constrained domains (e.g., medical) where synthetic examples are risky.
+
+**Search Modes**:
+- `search_mode='filtering'` (default): Brute-force filtering of all candidates. Works with or without sparsity.
+- `search_mode='kdtree'`: Fast KDTree-based nearest neighbor search. Only available when `sparsity=False` and no actionability restrictions.
+- `search_mode='ball_tree'`: BallTree with custom sparsity-aware distance metric (C × Hamming + L1). Requires `sparsity=True` and no actionability restrictions.
+
+```python
+# Default filtering (always works)
+cf = exp.generate_counterfactuals(
+    query,
+    method='data_supported',
+    search_mode='filtering',
+    sparsity=False,
+    ...
+)
+
+# Fast KDTree (no sparsity, no restrictions)
+cf = exp.generate_counterfactuals(
+    query,
+    method='data_supported',
+    search_mode='kdtree',
+    sparsity=False,
+    ...
+)
+
+# Sparse search with BallTree (sparsity=True, no restrictions)
+cf = exp.generate_counterfactuals(
+    query,
+    method='data_supported',
+    search_mode='ball_tree',
+    sparsity=True,
+    ...
+)
+```
+
+## Custom Backend Models
+
+ElliCE supports custom model wrappers for complex architectures or non-standard models. To use a custom backend:
+
+### 1. Create a Custom ModelWrapper
+
+Your custom class must inherit from `ModelWrapper` and implement the required abstract methods:
+
+```python
+from ellice.ellice.models.wrappers import ModelWrapper
+import torch
+import torch.nn as nn
+import numpy as np
+from typing import Tuple
+
+class CustomModelWrapper(ModelWrapper):
+    """Custom wrapper for your specific model architecture."""
+    
+    def __init__(self, model):
+        super().__init__(model, backend='custom')
+        self.model.eval()  # Set to evaluation mode
+    
+    def get_torch_model(self) -> nn.Module:
+        """Return the underlying PyTorch model."""
+        return self.model
+    
+    def split_model(self) -> Tuple[nn.Module, torch.Tensor]:
+        """
+        Split model into penultimate feature extractor and last layer.
+        
+        Returns:
+            penult: nn.Module that extracts penultimate features
+            theta: torch.Tensor of flattened (weights, bias) from last layer
+        """
+        # Example: For a model with structure [features -> hidden -> output]
+        # Extract everything except the last layer as penult
+        penult = nn.Sequential(*list(self.model.children())[:-1])
+        
+        # Get last layer parameters
+        last_layer = list(self.model.children())[-1]
+        weight = last_layer.weight.detach().view(-1)
+        bias = last_layer.bias.detach()
+        theta = torch.cat([weight, bias])
+        
+        return penult, theta
+    
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        """Return probability predictions for input X."""
+        device = next(self.model.parameters()).device
+        X_tensor = torch.from_numpy(X).float().to(device)
+        
+        with torch.no_grad():
+            logits = self.model(X_tensor)
+            if logits.shape[1] == 1:
+                # Binary classification
+                probs_1 = torch.sigmoid(logits)
+                probs_0 = 1 - probs_1
+                probs = torch.cat([probs_0, probs_1], dim=1)
+            else:
+                # Multi-class classification
+                probs = torch.softmax(logits, dim=1)
+        
+        return probs.cpu().numpy()
+```
+
+### 2. Use Custom Backend in Explainer
+
+```python
+# Initialize with custom backend
+exp = ellice.Explainer(
+    model=your_custom_model,
+    data=data,
+    backend='custom',
+    backend_model_class=CustomModelWrapper
+)
+
+# Generate counterfactuals as usual
+cf = exp.generate_counterfactuals(query, ...)
+```
+
+### Important Notes
+
+- **Model Structure**: Your model must have a linear last layer (for binary classification, output size 1; for multi-class, output size = number of classes).
+- **Penultimate Features**: The `split_model()` method must correctly identify the penultimate layer. For complex architectures (e.g., ResNet, Transformer), you may need custom logic.
+- **Device Handling**: Ensure your wrapper handles device placement correctly (CPU/CUDA/MPS).
+- **Binary vs Multi-class**: The `predict_proba` method should handle both binary (1 output) and multi-class (N outputs) cases.
+
+### Example: Complex Architecture
+
+For models with non-sequential structures, you might need to use hooks or custom forward passes:
+
+```python
+class ComplexModelWrapper(ModelWrapper):
+    def split_model(self) -> Tuple[nn.Module, torch.Tensor]:
+        # For a model with skip connections or complex structure,
+        # you might need to create a custom feature extractor
+        class FeatureExtractor(nn.Module):
+            def __init__(self, original_model):
+                super().__init__()
+                self.backbone = original_model.backbone
+                self.hidden = original_model.hidden_layers
+            
+            def forward(self, x):
+                x = self.backbone(x)
+                x = self.hidden(x)
+                return x
+        
+        penult = FeatureExtractor(self.model)
+        last_layer = self.model.classifier  # Assuming classifier is the last layer
+        weight = last_layer.weight.detach().view(-1)
+        bias = last_layer.bias.detach()
+        theta = torch.cat([weight, bias])
+        
+        return penult, theta
+```
+
+## Reproducibility
+
+For deterministic results, set random seeds before running:
+
+```python
+import random
+import numpy as np
+import torch
+
+def seed_everything(seed: int):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+seed_everything(42)  # Set before training models and generating counterfactuals
+```
 
 ## Citation
 
