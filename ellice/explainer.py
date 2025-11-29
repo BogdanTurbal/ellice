@@ -83,7 +83,7 @@ class Explainer:
             'reg_coef': regularization_coefficient,
             'device': self.device
         }
-        
+            
         # Generate
         results = []
         opt_params = optimization_params or {}

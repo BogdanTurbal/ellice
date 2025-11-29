@@ -14,7 +14,7 @@ class DataSupportedGenerator(EllipsoidGenerator):
     Selects the best counterfactual from existing data points (candidates)
     that satisfy robustness and actionability constraints.
     """
-
+    
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._candidates = {}
@@ -25,7 +25,7 @@ class DataSupportedGenerator(EllipsoidGenerator):
         """
         if target_class in self._candidates:
             return
-            
+        
         # Use training data as support set
         df = self.data.get_dev_data()
         X_support = df.values.astype(np.float32)
@@ -94,7 +94,7 @@ class DataSupportedGenerator(EllipsoidGenerator):
                 raise ValueError("search_mode='ball_tree' requires sparsity=True.")
         else:
             raise ValueError(f"Unknown search_mode: {search_mode}")
-
+        
         self._precompute_candidates(target_class)
         candidates_df = self._candidates[target_class]
         
