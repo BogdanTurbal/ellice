@@ -41,85 +41,36 @@ class SparseContinuousGenerator(ContinuousGenerator):
         feature_weights: Optional[Dict[str, float]] = None,
         group_weights: Optional[Dict[str, float]] = None,
         allowed_ranges_closest_grad: bool = GenerationConfig.allowed_ranges_closest_grad,
+        requires: str = "valid",
         **kwargs
     ) -> pd.DataFrame:
         
-        # 1. Run Full Optimization to get Gradients
-        # We use a temporary generator or modify internal state to track gradients
-        
-        # To implement "Accumulate gradient magnitudes", we need to hook into the optimization loop.
-        # Instead of duplicating the huge 'generate' method, we can run the standard generate
-        # but capture the gradients. However, 'generate' returns a DataFrame, not gradients.
-        
-        # Strategy: We will subclass and override, but since we need the internal loop logic,
-        # we might need to duplicate or refactor 'generate' to be more modular.
-        # Given the complexity, we will implement the logic here by calling a modified optimization routine
-        # or by copying the loop structure (which is safer to ensure exact behavior).
-        
-        # For now, to avoid massive code duplication, we will assume we can modify 'ContinuousGenerator'
-        # to expose a 'get_gradients' mode or similar? No, that's messy.
-        # We will implement the specialized loop here.
-        
         # --- Step 1: Full Optimization & Gradient Accumulation ---
         
-        # Initialize inputs (Same as ContinuousGenerator)
-        x_orig = torch.tensor(query_instance.values, dtype=self.dtype, device=self.device).unsqueeze(0)
-        feature_names = self.data.feature_names
-        input_dim = len(feature_names)
+        # Setup Optimization Variables
+        setup = self._initialize_optimization_setup(
+            query_instance, feature_weights, one_hot_groups, learning_rate, features_to_vary
+        )
         
-        # ... [Setup code for weights, indices, etc. similar to ContinuousGenerator] ...
-        # To avoid redundancy, let's assume we can use helper methods if we refactor ContinuousGenerator later.
-        # For now, I will implement a simplified version of the setup.
+        x_orig = setup['x_orig']
+        input_dim = setup['input_dim']
+        loss_weights = setup['loss_weights']
+        one_hot_indices = setup['one_hot_indices']
+        continuous_indices = setup['continuous_indices']
+        x_cont = setup['x_cont']
+        cat_logits_list = setup['cat_logits_list']
+        params = setup['params']
+        optimizer = setup['optimizer']
+        frozen_indices_cont = setup['frozen_indices_cont']
+        frozen_groups_cat = setup['frozen_groups_cat']
         
-        # Standard setup (copied logic for correctness)
-        loss_weights = torch.ones(input_dim, device=self.device, dtype=self.dtype)
-        if feature_weights:
-            for feat, w in feature_weights.items():
-                if feat in feature_names:
-                    loss_weights[feature_names.index(feat)] = w
-        
-        if one_hot_groups:
-            one_hot_indices = []
-            categorical_mask = np.zeros(input_dim, dtype=bool)
-            for group in one_hot_groups:
-                indices = [feature_names.index(col) for col in group if col in feature_names]
-                if indices:
-                    one_hot_indices.append(indices)
-                    categorical_mask[indices] = True
-            continuous_indices = [i for i in range(input_dim) if not categorical_mask[i]]
-        else:
-            one_hot_indices = []
-            continuous_indices = list(range(input_dim))
-
         # Accumulator for gradients
         grad_accumulator = torch.zeros(input_dim, device=self.device, dtype=self.dtype)
         
-        # Run optimization loop (Short run? Or full run?)
-        # Paper says: "Run the standard continuous ElliCE optimization... accumulate..."
-        # So we run it.
-        
-        # We need mutable variables
-        x_cont = None
-        cat_logits_list = []
-        params = []
-        
-        if continuous_indices:
-            x_cont = x_orig[0, continuous_indices].clone().detach().requires_grad_(True)
-            params.append(x_cont)
-            
-        if one_hot_indices:
-            for group_indices in one_hot_indices:
-                current_vals = x_orig[0, group_indices]
-                active_idx = torch.argmax(current_vals).item()
-                logits = torch.full((len(group_indices),), 0.1, device=self.device, dtype=self.dtype, requires_grad=True)
-                logits.data[active_idx] = 1.0
-                cat_logits_list.append(logits)
-                params.append(logits)
-        
-        optimizer = optim.Adam(params, lr=learning_rate)
-        
-        # Helper for Constraints (reused logic)
-        # ... (Omitting complex constraint setup for brevity, assuming standard bounds)
+        # Setup Constraints
+        range_constraints_cont, allowed_values_cont, one_way_constraints_cont = self._initialize_constraints(
+            continuous_indices, permitted_range, allowed_values, one_way_change
+        )
         
         # Pre-compute constant
         inv_sqrt = self.Q_inv_sqrt
@@ -137,8 +88,12 @@ class SparseContinuousGenerator(ContinuousGenerator):
                 x_cf_full[0, continuous_indices] = x_cont
             if cat_logits_list:
                 for idx, group_indices in enumerate(one_hot_indices):
-                    probs = self._gumbel_softmax_sample(cat_logits_list[idx], tau=gumbel_temperature)
-                    x_cf_full[0, group_indices] = probs
+                    if idx in frozen_groups_cat:
+                        orig_vals = x_orig[0, group_indices]
+                        x_cf_full[0, group_indices] = orig_vals
+                    else:
+                        probs = self._gumbel_softmax_sample(cat_logits_list[idx], tau=gumbel_temperature)
+                        x_cf_full[0, group_indices] = probs
             
             # Forward & Loss
             h_flat = self._get_penult_features(x_cf_full)
@@ -157,9 +112,9 @@ class SparseContinuousGenerator(ContinuousGenerator):
             robust_logit = torch.matmul(h_aug, worst_theta)
             
             if target_class == 1:
-                loss_robust = F.relu(-robust_logit)
+                loss_robust = -robust_logit
             else:
-                loss_robust = F.relu(robust_logit)
+                loss_robust = robust_logit
                 
             diff = x_cf_full - x_orig
             weighted_diff_sq = loss_weights * (diff ** 2)
@@ -174,8 +129,6 @@ class SparseContinuousGenerator(ContinuousGenerator):
                 grad_accumulator[continuous_indices] += x_cont.grad.abs()
             
             # Categorical
-            # For sparsity, we treat the group as a single feature or per-logit?
-            # Paper implies feature-level. If one-hot, maybe sum grads of the group?
             if cat_logits_list:
                 for idx, logits in enumerate(cat_logits_list):
                     if logits.grad is not None:
@@ -189,16 +142,27 @@ class SparseContinuousGenerator(ContinuousGenerator):
             torch.nn.utils.clip_grad_norm_(params, max_norm=AlgorithmConfig.clip_grad_norm)
             optimizer.step()
             
-            # ... (Constraints projection logic would go here) ...
+            # 4. Projections / Constraints (Only on Continuous Variables)
+            self._project_continuous_features(
+                x_cont, x_orig, continuous_indices, frozen_indices_cont,
+                allowed_values_cont, range_constraints_cont, one_way_constraints_cont
+            )
             
-            # Check robustness (Early stop if robust)
-            # But we want to accumulate enough gradients.
-            # Let's run for at least some iterations, or full patience?
-            # Proceeding...
 
         # --- Step 2: Rank Features ---
         # Sort indices by accumulated gradient magnitude (descending)
         sorted_indices = torch.argsort(grad_accumulator, descending=True).cpu().numpy()
+        
+        # Filter out immutable features from sorted_indices
+        frozen_global_indices = set()
+        for local_idx in frozen_indices_cont:
+            frozen_global_indices.add(continuous_indices[local_idx])
+        
+        for group_idx in frozen_groups_cat:
+            for global_idx in one_hot_indices[group_idx]:
+                frozen_global_indices.add(global_idx)
+                
+        sorted_indices = [idx for idx in sorted_indices if idx not in frozen_global_indices]
         
         # --- Step 3: Iterative Selection (Greedy) ---
         # active_set = set()
@@ -217,16 +181,14 @@ class SparseContinuousGenerator(ContinuousGenerator):
         
         # Let's iterate through sorted features
         final_cf = None
+        best_valid_cf = None
         
         if progress_bar:
             print("Running Sparse Optimization...")
             
         # We try K = 1 to N features
-        for k in range(1, input_dim + 1):
-            # Add next best feature
-            # Note: If features are one-hot groups, we should add the WHOLE group if one index is selected?
-            # For simplicity, we'll handle individual indices, but enforce group consistency in mask.
-            
+        for k in range(1, len(sorted_indices) + 1):
+            #print(f"Trying {k} features...")
             idx_to_add = sorted_indices[k-1]
             active_mask[idx_to_add] = True
             
@@ -237,12 +199,6 @@ class SparseContinuousGenerator(ContinuousGenerator):
                         active_mask[grp] = True
                         break
             
-            # Setup Masked Optimization
-            # Initialize variables again to x_orig
-            # We want to optimize ONLY features where active_mask is True.
-            # Others are fixed to x_orig.
-            
-            # Effectively, we can just freeze the non-active params.
             
             params_k = []
             
@@ -303,7 +259,9 @@ class SparseContinuousGenerator(ContinuousGenerator):
                 h_flat = self._get_penult_features(x_cf_curr)
                 h_aug = torch.cat([h_flat, bias_c], dim=1)
                 
+                # Check original model logit for "valid" requirement
                 with torch.no_grad():
+                    val_term1 = torch.matmul(h_aug, self.omega_c).item()
                     worst_theta = self._compute_worst_model(h_aug)
                 
                 if target_class == 0:
@@ -313,19 +271,28 @@ class SparseContinuousGenerator(ContinuousGenerator):
                     worst_theta = self.omega_c + direction.squeeze()
 
                 robust_logit = torch.matmul(h_aug, worst_theta)
+                robust_logit_val = robust_logit.item()
                 
                 if target_class == 1:
                     loss_robust = F.relu(-robust_logit)
-                    is_valid = robust_logit > 0
+                    is_robust = robust_logit_val > 0
+                    is_valid_orig = val_term1 > 0
                 else:
                     loss_robust = F.relu(robust_logit)
-                    is_valid = robust_logit < 0
+                    is_robust = robust_logit_val < 0
+                    is_valid_orig = val_term1 < 0
                 
-                if is_valid:
-                    # Found robust CF with current active set!
+                # Check if meets requirements
+                # 1. Robustness (Stop immediately)
+                if is_robust:
                     found_robust = True
                     final_cf = x_cf_curr.detach()
                     break
+                
+                # 2. Validity (Store best/first found, continue searching for robust)
+                if is_valid_orig:
+                    if best_valid_cf is None:
+                        best_valid_cf = x_cf_curr.detach()
                 
                 diff = x_cf_curr - x_orig
                 weighted_diff_sq = loss_weights * (diff ** 2)
@@ -337,15 +304,109 @@ class SparseContinuousGenerator(ContinuousGenerator):
                 torch.nn.utils.clip_grad_norm_(params_k, max_norm=AlgorithmConfig.clip_grad_norm)
                 optimizer_k.step()
                 
-                # (Constraints projection should ideally happen here too)
+                # Projections / Constraints for sparse loop
+                with torch.no_grad():
+                    if x_cont_k is not None:
+                        # Global bounds check first (clipping)
+                        for k_idx, global_idx in enumerate(active_cont_indices):
+                             min_val = self.feature_mins[global_idx]
+                             max_val = self.feature_maxs[global_idx]
+                             x_cont_k.data[k_idx] = torch.clamp(x_cont_k.data[k_idx], min_val, max_val)
+
+                        # 1. Enforce min/max of allowed values
+                        for idx, vals in allowed_values_cont:
+                            global_idx = continuous_indices[idx]
+                            if global_idx in active_cont_indices:
+                                k_idx = active_cont_indices.index(global_idx)
+                                min_v, max_v = vals[0], vals[-1]
+                                x_cont_k.data[k_idx] = torch.clamp(x_cont_k.data[k_idx], min_v, max_v)
+                        
+                        # Clip to permitted ranges
+                        for idx, min_v, max_v in range_constraints_cont:
+                            global_idx = continuous_indices[idx]
+                            if global_idx in active_cont_indices:
+                                k_idx = active_cont_indices.index(global_idx)
+                                x_cont_k.data[k_idx] = torch.clamp(x_cont_k.data[k_idx], min_v, max_v)
+                        
+                        # Enforce one-way changes
+                        for idx, direction in one_way_constraints_cont:
+                            global_idx = continuous_indices[idx]
+                            if global_idx in active_cont_indices:
+                                k_idx = active_cont_indices.index(global_idx)
+                                orig_val = x_orig.data[0, global_idx]
+                                if direction == 'increase':
+                                     x_cont_k.data[k_idx] = torch.max(x_cont_k.data[k_idx], orig_val)
+                                elif direction == 'decrease':
+                                     x_cont_k.data[k_idx] = torch.min(x_cont_k.data[k_idx], orig_val)
+                        
+                        # Snap to allowed values (Hard constraint)
+                        for idx, vals in allowed_values_cont:
+                            global_idx = continuous_indices[idx]
+                            if global_idx in active_cont_indices:
+                                k_idx = active_cont_indices.index(global_idx)
+                                val = x_cont_k.data[k_idx]
+                                diff = (vals - val).abs()
+                                min_idx = torch.argmin(diff)
+                                x_cont_k.data[k_idx] = vals[min_idx]
             
             if found_robust:
                 if progress_bar:
-                    print(f"Robust CF found with {k} active features (or groups).")
+                    req_text = "robust" if requires == "robust" else "valid" if requires == "valid" else "CF"
+                    print(f"{req_text.capitalize()} CF found with {k} active features (or groups).")
                 break
         
         if final_cf is None:
-            return pd.DataFrame()
+            # No robust CF found. Check if we found a valid one and if that satisfies requirements.
+            if (requires == "valid" or requires == "none") and best_valid_cf is not None:
+                final_cf = best_valid_cf
+            
+            # If still None, we failed
+            elif requires in ["valid", "robust"]:
+                import warnings
+                warnings.warn(
+                    f"\n Failed to find {requires} counterfactual after trying all features. "
+                    f"Try to increase regularization_coefficient or decrease robustness_epsilon",
+                    UserWarning
+                )
+                # Return original query instance
+                return pd.DataFrame([query_instance], columns=self.data.feature_names)
+            else:
+                # requires == "none": return empty
+                return pd.DataFrame()
+        
+        # Verify final_cf meets requirements (double-check)
+        if requires in ["valid", "robust"]:
+            # Check if final_cf is actually valid/robust
+            final_cf_df = pd.DataFrame(final_cf.cpu().numpy(), columns=self.data.feature_names)
+            final_cf_tensor = torch.tensor(final_cf_df.values, dtype=self.dtype, device=self.device)
+            
+            with torch.no_grad():
+                h_flat = self._get_penult_features(final_cf_tensor)
+                bias = torch.ones(h_flat.size(0), 1, device=self.device, dtype=self.dtype)
+                h_aug = torch.cat([h_flat, bias], dim=1)
+                
+                val_term1 = torch.matmul(h_aug, self.omega_c).item()
+                worst_theta = self._compute_worst_model(h_aug)
+                robust_logit = torch.matmul(h_aug, worst_theta).item()
+                
+                if requires == "robust":
+                    is_robust = (target_class == 1 and robust_logit > 0) or (target_class == 0 and robust_logit < 0)
+                    if not is_robust:
+                        return pd.DataFrame([query_instance], columns=self.data.feature_names)
+                elif requires == "valid":
+                    is_valid = (target_class == 1 and val_term1 > 0) or (target_class == 0 and val_term1 < 0)
+                    if not is_valid:
+                        return pd.DataFrame([query_instance], columns=self.data.feature_names)
+                    
+                    # Check if valid but not robust - warn user
+                    is_robust = (target_class == 1 and robust_logit > 0) or (target_class == 0 and robust_logit < 0)
+                    if not is_robust:
+                        import warnings
+                        warnings.warn(
+                            f"\n Found valid counterfactual but it is not robust (robust_logit={robust_logit:.4f}). "
+                            f"Try to increase regularization_coefficient or decrease robustness_epsilon for better robustness.",
+                            UserWarning
+                        )
             
         return pd.DataFrame(final_cf.cpu().numpy(), columns=self.data.feature_names)
 

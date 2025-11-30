@@ -78,6 +78,7 @@ class DataSupportedGenerator(EllipsoidGenerator):
         target_class: int = 1,
         search_mode: str = 'filtering', # 'filtering', 'kdtree', 'ball_tree'
         sparsity: bool = False,
+        requires: str = "valid",
         **kwargs
     ) -> pd.DataFrame:
         
@@ -100,6 +101,9 @@ class DataSupportedGenerator(EllipsoidGenerator):
         
         if candidates_df is None or candidates_df.empty:
             print("No robust candidates found in the data support set.")
+            if requires in ["valid", "robust"]:
+                # Return original query instance
+                return pd.DataFrame([query_instance], columns=self.data.feature_names)
             return pd.DataFrame()
             
         valid_candidates = candidates_df.copy()
@@ -128,6 +132,9 @@ class DataSupportedGenerator(EllipsoidGenerator):
 
         if valid_candidates.empty:
             print("No candidates satisfy actionability constraints.")
+            if requires in ["valid", "robust"]:
+                # Return original query instance
+                return pd.DataFrame([query_instance], columns=self.data.feature_names)
             return pd.DataFrame()
 
         # If no restrictions are specified (or even if they are), use search mode logic
@@ -185,4 +192,32 @@ class DataSupportedGenerator(EllipsoidGenerator):
             sorted_idx = np.argsort(dists)
             best_indices = sorted_idx[:k]
         
-        return valid_candidates.iloc[best_indices]
+        result_candidates = valid_candidates.iloc[best_indices]
+        
+        # Check requirements for the selected candidates
+        if requires == "valid":
+            # Verify candidates are valid for original model
+            # Candidates are already robust (precomputed), but we need to check original model
+            valid_results = []
+            for idx, candidate in result_candidates.iterrows():
+                candidate_tensor = torch.tensor(candidate.values.reshape(1, -1), dtype=self.dtype, device=self.device)
+                with torch.no_grad():
+                    h_flat = self._get_penult_features(candidate_tensor)
+                    bias = torch.ones(h_flat.size(0), 1, device=self.device, dtype=self.dtype)
+                    h_aug = torch.cat([h_flat, bias], dim=1)
+                    val_term1 = torch.matmul(h_aug, self.omega_c).item()
+                    
+                    is_valid = (target_class == 1 and val_term1 > 0) or (target_class == 0 and val_term1 < 0)
+                    if is_valid:
+                        valid_results.append(candidate)
+            
+            if not valid_results:
+                # No valid candidates, return original
+                return pd.DataFrame([query_instance], columns=self.data.feature_names)
+            return pd.DataFrame(valid_results).reset_index(drop=True)
+        elif requires == "robust":
+            # Candidates are already robust (precomputed), so just return them
+            return result_candidates.reset_index(drop=True)
+        else:
+            # requires == "none": return whatever we got
+            return result_candidates.reset_index(drop=True)

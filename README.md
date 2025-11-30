@@ -47,6 +47,7 @@ pip install -e .
     *   **Data-Supported**: Selects the best robust candidates from existing data points.
     *   **Sparsity Support**: Find counterfactuals with minimal feature changes (available for both modes).
 *   **Backend Support**: Works seamlessly with both **Scikit-Learn** (Logistic Regression) and **PyTorch** models.
+*   **Binary Classification**: Currently optimized for binary classification tasks.
 *   **Device Agnostic**: Automatic GPU/CPU detection with explicit device control (CUDA/CPU).
 *   **Deterministic Execution**: Reproducible results with proper random seeding.
 
@@ -64,6 +65,8 @@ Controls default parameters for counterfactual generation:
 - `gumbel_temperature`: Temperature for Gumbel-Softmax (default: 1.0)
 - `early_stopping`: Enable early stopping (default: True)
 - `progress_bar`: Show progress bar (default: True)
+
+> **Note:** In practice, `robustness_epsilon` could be set to 10% of train loss as default, or determined using a set of proxy models (hyperparameter tuning is a procedure described in the paper). For example, if we use an additive 0.01 to the train loss, we have `loss <= train loss + 0.01`. 10% of train loss in practice would mean `loss <= train loss * 1.1`. (See `ellice_demo.ipynb` cells 28-29 for details).
 
 ### AlgorithmConfig
 Controls algorithmic stability and internal constants:
@@ -84,6 +87,8 @@ AlgorithmConfig.device = "cuda"  # Force CUDA, or use "auto" for automatic detec
 ```
 
 ## Quick Start
+
+> **Note:** For a comprehensive demonstration of all features, check out the `ellice_demo.ipynb` notebook included in the repository.
 
 ```python
 import ellice
@@ -221,7 +226,10 @@ Optimizes the input features directly using gradient descent.
 *   **Pros**: Finds the counterfactual closest to the query.
 *   **Cons**: May produce synthetic points that don't exist in the data (though usually plausible).
 
-**Sparsity Support**: Enable `sparsity=True` to find counterfactuals with minimal feature changes using iterative feature selection (Algorithm 3 from the paper).
+**Sparsity Support**: Enable `sparsity=True` to find counterfactuals with minimal feature changes. It uses **Algorithm 3** from the paper, which:
+1.  Runs a full optimization to determine gradient magnitudes for each feature.
+2.  Ranks features by importance (accumulated gradients).
+3.  Iteratively selects features in a greedy manner (starting with the most important) and optimizes using only those features until a robust counterfactual is found.
 
 ```python
 cf = exp.generate_counterfactuals(

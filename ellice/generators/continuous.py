@@ -23,6 +23,216 @@ class ContinuousGenerator(EllipsoidGenerator):
         y = logits + gumbel_noise
         return F.softmax(y / tau, dim=-1)
 
+    def _initialize_optimization_setup(
+        self,
+        query_instance: pd.Series,
+        feature_weights: Optional[Dict[str, float]],
+        one_hot_groups: Optional[List[List[str]]],
+        learning_rate: float,
+        features_to_vary: Optional[List[str]]
+    ):
+        # Prepare Input
+        x_orig = torch.tensor(query_instance.values, dtype=self.dtype, device=self.device).unsqueeze(0)
+        feature_names = self.data.feature_names
+        input_dim = len(feature_names)
+        
+        # Compute Weights Vector (for L2 loss)
+        loss_weights = torch.ones(input_dim, device=self.device, dtype=self.dtype)
+        
+        # 1. Apply feature_weights
+        if feature_weights:
+            for feat, w in feature_weights.items():
+                if feat in feature_names:
+                    idx = feature_names.index(feat)
+                    loss_weights[idx] = w
+                    
+        # 2. Apply default 0.5 weight for one-hot groups if not specified
+        if one_hot_groups:
+            for group in one_hot_groups:
+                indices = [feature_names.index(col) for col in group if col in feature_names]
+                for idx in indices:
+                    feat_name = feature_names[idx]
+                    if feature_weights is None or feat_name not in feature_weights:
+                        loss_weights[idx] = GenerationConfig.default_group_weight
+        
+        # Handle One-Hot Groups
+        if one_hot_groups:
+            one_hot_indices = []
+            categorical_mask = np.zeros(input_dim, dtype=bool)
+            
+            for group in one_hot_groups:
+                indices = [feature_names.index(col) for col in group if col in feature_names]
+                if indices:
+                    one_hot_indices.append(indices)
+                    categorical_mask[indices] = True
+            
+            continuous_indices = [i for i in range(input_dim) if not categorical_mask[i]]
+        else:
+            one_hot_indices = []
+            continuous_indices = list(range(input_dim))
+
+        # Initialize Optimization Variables
+        params = []
+        
+        # 1. Continuous Features
+        if continuous_indices:
+            x_cont = x_orig[0, continuous_indices].clone().detach().requires_grad_(True)
+            params.append(x_cont)
+        else:
+            x_cont = None
+            
+        # 2. Categorical Logits
+        cat_logits_list = []
+        if one_hot_indices:
+            for group_indices in one_hot_indices:
+                current_vals = x_orig[0, group_indices]
+                active_idx = torch.argmax(current_vals).item()
+                
+                logits = torch.full((len(group_indices),), 0.1, device=self.device, dtype=self.dtype, requires_grad=True)
+                logits.data[active_idx] = 1.0 # Strong bias towards original
+                
+                cat_logits_list.append(logits)
+                params.append(logits)
+        
+        optimizer = optim.Adam(params, lr=learning_rate)
+        
+        # Identify indices to freeze (Immutable features)
+        frozen_indices_cont = [] # Indices relative to x_cont
+        frozen_groups_cat = [] # Indices relative to cat_logits_list
+        
+        if features_to_vary is not None and features_to_vary != 'all':
+            for i, global_idx in enumerate(continuous_indices):
+                feat_name = feature_names[global_idx]
+                if feat_name not in features_to_vary:
+                    frozen_indices_cont.append(i)
+            
+            for i, group_indices in enumerate(one_hot_indices):
+                group_names = [feature_names[idx] for idx in group_indices]
+                if all(name not in features_to_vary for name in group_names):
+                    frozen_groups_cat.append(i)
+        elif features_to_vary == 'all':
+            pass 
+        elif GenerationConfig.features_to_vary:
+             features_to_vary = GenerationConfig.features_to_vary
+             for i, global_idx in enumerate(continuous_indices):
+                feat_name = feature_names[global_idx]
+                if feat_name not in features_to_vary:
+                    frozen_indices_cont.append(i)
+             for i, group_indices in enumerate(one_hot_indices):
+                group_names = [feature_names[idx] for idx in group_indices]
+                if all(name not in features_to_vary for name in group_names):
+                    frozen_groups_cat.append(i)
+
+        return {
+            'x_orig': x_orig,
+            'feature_names': feature_names,
+            'input_dim': input_dim,
+            'loss_weights': loss_weights,
+            'one_hot_indices': one_hot_indices,
+            'continuous_indices': continuous_indices,
+            'x_cont': x_cont,
+            'cat_logits_list': cat_logits_list,
+            'params': params,
+            'optimizer': optimizer,
+            'frozen_indices_cont': frozen_indices_cont,
+            'frozen_groups_cat': frozen_groups_cat
+        }
+
+    def _initialize_constraints(
+        self,
+        continuous_indices: List[int],
+        permitted_range: Optional[Dict[str, List[float]]],
+        allowed_values: Optional[Dict[str, List[float]]],
+        one_way_change: Optional[Dict[str, str]]
+    ):
+        feature_names = self.data.feature_names
+        
+        # Merge Runtime and Config constraints
+        if permitted_range is None and GenerationConfig.permitted_range:
+            permitted_range = GenerationConfig.permitted_range
+            
+        if one_way_change is None and GenerationConfig.one_way_change:
+            one_way_change = GenerationConfig.one_way_change
+
+        if allowed_values is None and GenerationConfig.allowed_values:
+            allowed_values = GenerationConfig.allowed_values
+        
+        range_constraints_cont = []
+        allowed_values_cont = []
+        one_way_constraints_cont = []
+
+        if permitted_range:
+            for feat, (min_v, max_v) in permitted_range.items():
+                if feat in feature_names:
+                    global_idx = feature_names.index(feat)
+                    if global_idx in continuous_indices:
+                        local_idx = continuous_indices.index(global_idx)
+                        range_constraints_cont.append((local_idx, min_v, max_v))
+        
+        if allowed_values:
+            for feat, vals in allowed_values.items():
+                if feat in feature_names:
+                    global_idx = feature_names.index(feat)
+                    if global_idx in continuous_indices:
+                        local_idx = continuous_indices.index(global_idx)
+                        vals_sorted = torch.tensor(sorted(vals), device=self.device, dtype=self.dtype)
+                        allowed_values_cont.append((local_idx, vals_sorted))
+                    
+        if one_way_change:
+            for feat, direction in one_way_change.items():
+                if feat in feature_names:
+                    global_idx = feature_names.index(feat)
+                    if global_idx in continuous_indices:
+                        local_idx = continuous_indices.index(global_idx)
+                        one_way_constraints_cont.append((local_idx, direction))
+                        
+        return range_constraints_cont, allowed_values_cont, one_way_constraints_cont
+
+    def _project_continuous_features(
+        self,
+        x_cont: torch.Tensor,
+        x_orig: torch.Tensor,
+        continuous_indices: List[int],
+        frozen_indices_cont: List[int],
+        allowed_values_cont: List,
+        range_constraints_cont: List,
+        one_way_constraints_cont: List
+    ):
+        with torch.no_grad():
+            if x_cont is not None:
+                # 1. Enforce min/max of allowed values as global bounds
+                for idx, vals in allowed_values_cont:
+                    min_v, max_v = vals[0], vals[-1]
+                    x_cont.data[idx] = torch.clamp(x_cont.data[idx], min_v, max_v)
+
+                # Reset immutable features
+                if frozen_indices_cont:
+                    x_cont.data[frozen_indices_cont] = x_orig.data[0, continuous_indices][frozen_indices_cont]
+                    
+                # Clip to global bounds
+                global_mins = self.feature_mins[continuous_indices]
+                global_maxs = self.feature_maxs[continuous_indices]
+                x_cont.data = torch.max(torch.min(x_cont.data, global_maxs), global_mins)
+                
+                # Clip to permitted ranges
+                for idx, min_v, max_v in range_constraints_cont:
+                    x_cont.data[idx] = torch.clamp(x_cont.data[idx], min_v, max_v)
+                    
+                # Enforce one-way changes
+                for idx, direction in one_way_constraints_cont:
+                    orig_val = x_orig.data[0, continuous_indices][idx]
+                    if direction == 'increase':
+                         x_cont.data[idx] = torch.max(x_cont.data[idx], orig_val)
+                    elif direction == 'decrease':
+                         x_cont.data[idx] = torch.min(x_cont.data[idx], orig_val)
+                         
+                # Snap to allowed values (Hard constraint)
+                for idx, vals in allowed_values_cont:
+                    val = x_cont.data[idx]
+                    diff = (vals - val).abs()
+                    min_idx = torch.argmin(diff)
+                    x_cont.data[idx] = vals[min_idx]
+
     def generate(
         self,
         query_instance: pd.Series,
@@ -43,7 +253,8 @@ class ContinuousGenerator(EllipsoidGenerator):
         gradient_mode: str = GenerationConfig.gradient_mode, 
         feature_weights: Optional[Dict[str, float]] = None,
         group_weights: Optional[Dict[str, float]] = None,
-        allowed_ranges_closest_grad: bool = GenerationConfig.allowed_ranges_closest_grad, 
+        allowed_ranges_closest_grad: bool = GenerationConfig.allowed_ranges_closest_grad,
+        requires: str = "valid",
         **kwargs
     ) -> pd.DataFrame:
         
@@ -66,15 +277,6 @@ class ContinuousGenerator(EllipsoidGenerator):
         # 2. Apply default 0.5 weight for one-hot groups if not specified
         if one_hot_groups:
             for group in one_hot_groups:
-                # Check if user provided explicit weights for any feature in this group
-                # If yes, respect them. If no, set to 0.5
-                # Wait, user said "each group by default has weight 1/2".
-                # Does this mean sum of weights in group is 1/2? Or each feature is 1/2?
-                # Example: (1,0,0) -> (0,1,0). Diff vector: (-1, 1, 0). L2^2 = 1+1=2. L2 = sqrt(2).
-                # User wants distance 1.
-                # If weight is w, then weighted L2^2 = w*(-1)^2 + w*(1)^2 = 2w.
-                # We want sqrt(2w) = 1 => 2w = 1 => w = 0.5.
-                # So yes, weight 0.5 per feature in the group achieves distance 1 for a swap.
                 
                 indices = [feature_names.index(col) for col in group if col in feature_names]
                 for idx in indices:
@@ -133,6 +335,7 @@ class ContinuousGenerator(EllipsoidGenerator):
         # Best tracking
         best_x = x_orig.clone().detach()
         best_robust_logit = -float('inf')
+        best_val_term1 = None  # Track best original model logit for "valid" check
         
         # Early Stopping
         no_improve_count = 0
@@ -217,9 +420,11 @@ class ContinuousGenerator(EllipsoidGenerator):
         
         # Setup Progress Bar
         iterator = range(max_iterations)
+        #self.progress_bar = None
         if progress_bar:
             print("Progress Bar Enabled")
             iterator = tqdm(iterator, desc="Generating CF", leave=True, mininterval=0)
+            #self.progress_bar = iterator
 
         for i in iterator:
             optimizer.zero_grad()
@@ -268,25 +473,6 @@ class ContinuousGenerator(EllipsoidGenerator):
             # 3. Proximity Loss
             # Weighted L2
             diff = x_cf_full - x_orig
-            # We want sqrt( sum( w_i * diff_i^2 ) )?
-            # Or sum( w_i * diff_i^2 )? 
-            # Standard weighted L2 is usually sqrt( (Wx)^T (Wx) ) or sqrt( x^T W x ).
-            # Let's assume loss_weights represents diagonal of W matrix in x^T W x?
-            # No, usually weights apply to the cost.
-            # User said: "weight 1/2 (because I want... distance 1)"
-            # Implies the contribution to the DISTANCE metric.
-            # If we use torch.norm(weighted_diff), that is sqrt( sum (w_i * d_i)^2 ).
-            # If w_i = 0.5, then contribution is 0.5 * diff.
-            # For (1,0) -> (0,1), diff is (-1, 1).
-            # Weighted diff: (-0.5, 0.5). Norm^2 = 0.25 + 0.25 = 0.5. Norm = 0.707.
-            # This is NOT 1.
-            
-            # User wants: Distance between (1,0) and (0,1) to be 1.
-            # Unweighted squared distance is 2.
-            # We want Weighted Squared Distance = 1.
-            # Sum w_i * (diff_i)^2 = 1?
-            # w * 1 + w * 1 = 2w = 1 => w = 0.5.
-            # So we need sqrt( sum( w_i * diff_i^2 ) ).
             
             weighted_diff_sq = loss_weights * (diff ** 2)
             loss_prox = torch.sqrt(torch.sum(weighted_diff_sq) + AlgorithmConfig.epsilon)
@@ -298,24 +484,6 @@ class ContinuousGenerator(EllipsoidGenerator):
             
             # "Gradient Interpolation" for Allowed Values
             if x_cont is not None and x_cont.grad is not None and allowed_values_cont:
-                # Prepare batch of inputs to compute gradients at discrete points
-                # For each feature i with allowed values, we need to evaluate at v_left and v_right
-                # We can construct a large batch where:
-                # Row 0: original x_cf
-                # Row 1: x_cf with feature i = v_left
-                # Row 2: x_cf with feature i = v_right
-                # ... for all i
-                
-                # However, computing full gradients for all these is expensive (backward pass per row?)
-                # Or can we do one backward pass on sum of losses?
-                # If we have K constrained features, we have 2*K perturbed inputs.
-                # We want dLoss/dx_i AT perturbed input.
-                # If we put them in a batch, `backward()` accumulates gradients into x_cont.grad? 
-                # No, we need separate gradients.
-                
-                # Efficient Strategy:
-                # 1. We assume we only need the gradient w.r.t the *specific* feature i being perturbed.
-                # 2. We can use `torch.autograd.grad` on the batched output.
                 
                 # Construct batch
                 batch_inputs = []
@@ -345,18 +513,8 @@ class ContinuousGenerator(EllipsoidGenerator):
                             else:
                                 v_target = v_right
                                 
-                            # We treat this as if we are AT v_target for gradient computation
-                            # Weight 1.0 for target, 0.0 for other
-                            # Just reuse existing logic with p=1
                             interpolation_weights.append((idx, 1.0 if v_target == v_left else 0.0, 1.0 if v_target == v_right else 0.0))
                             
-                            # Only add the target to batch inputs?
-                            # The current logic constructs both left and right and weights them.
-                            # If we set weight to 0, the gradient contribution is 0.
-                            # But we still pay compute cost for the 0-weight one.
-                            # Optimization: If p=0, don't add to batch?
-                            # Current implementation relies on indices 2*k and 2*k+1.
-                            # Changing that is complex. Keeping it simple: compute both, weight one 0.
                             
                             x_left = current_x.clone()
                             x_left[0, continuous_indices[idx]] = v_left
@@ -434,9 +592,9 @@ class ContinuousGenerator(EllipsoidGenerator):
 
                     # Loss (Batch)
                     if target_class == 1:
-                        loss_rob_batch = F.relu(-robust_logit_batch)
+                        loss_rob_batch = -robust_logit_batch
                     else:
-                        loss_rob_batch = F.relu(robust_logit_batch)
+                        loss_rob_batch = robust_logit_batch
                         
                     # Proximity (Batch) - Distance to x_orig
                     # x_orig is [1, dim], batch is [N, dim]
@@ -468,18 +626,10 @@ class ContinuousGenerator(EllipsoidGenerator):
             torch.nn.utils.clip_grad_norm_(params, max_norm=AlgorithmConfig.clip_grad_norm)
 
             optimizer.step()
-
-            #print(logits)
             
             # 4. Projections / Constraints (Only on Continuous Variables)
             with torch.no_grad():
                 if x_cont is not None:
-                    # Project to allowed values (Hard constraint at projection step? Or keep soft?)
-                    # User request: "probability proportional to closest left... apply it to continuous"
-                    # This sounds like we should keep it continuous during opt, but maybe snap at the end?
-                    # Or snap probabilistically?
-                    # Let's implement snapping to nearest allowed value at the END of optimization (or check validity).
-                    # During optimization, we just constrain to min/max of allowed range.
                     
                     # 1. Enforce min/max of allowed values as global bounds for that feature
                     for idx, vals in allowed_values_cont:
@@ -548,48 +698,60 @@ class ContinuousGenerator(EllipsoidGenerator):
                     robust_prob = 1 - (1 / (1 + np.exp(-val_robust_logit)))
                     metric = -val_robust_logit 
 
-                # Update Progress Bar
-                if progress_bar:
-                    iterator.set_postfix({
-                        'Prob': f"{current_prob:.3f}",
-                        'RobProb': f"{robust_prob:.3f}",
-                        'BestRobLogit': f"{best_robust_logit:.3f}"
-                    })
-
-                # Save best
-                # If robust_logit is > 0 (i.e., we crossed the boundary), we prefer the one with best proximity?
-                # Or we maximize robust_logit?
-                # User said: "when robust logit becames > 0 => stop the optimization"
-                
                 # Update Best logic
                 # We still track the max robust logit found so far, but if we cross 0, we might want to stop.
                 if metric > best_robust_logit:
                     best_robust_logit = metric
                     best_x = x_val_full.clone().detach()
+                    best_val_term1 = val_term1  # Store original model logit
                     no_improve_count = 0
                 else:
                     no_improve_count += 1
 
-                # Force saving if not robust yet but better than nothing
-                # Or maybe we should always return the best_x found?
-                # The current logic updates best_x only if metric > best_robust_logit
-                # This is correct for maximizing robustness.
+                # Update Progress Bar
+                if progress_bar:
+                    iterator.set_postfix({
+                        'Prob': f"{current_prob:.3f}",
+                        'RobLogit': f"{-val_robust_logit:.3f}",
+                        'BestRobLogit': f"{best_robust_logit:.3f}"
+                    })
 
                 # Early Stopping
                 # 1. Standard patience
                 if early_stopping and no_improve_count >= patience:
+                    import warnings
+                    warnings.warn(
+                        f"\n Early stopping due to failed convergence and no improvement for {patience} steps. "
+                        f"Try to increase regularization_coefficient or decrease robustness_epsilon",
+                        UserWarning
+                    )
                     if progress_bar:
                         iterator.close()
                     break
                     
                 # 2. Stop if robust (User request)
-                # metric corresponds to robust_logit (or -robust_logit for class 0)
-                # If target=1, metric = robust_logit. If metric > 0, we are robust.
-                # If target=0, metric = -robust_logit. If metric > 0, robust_logit < 0, we are robust.
                 if metric > 0:
                     if progress_bar:
-                        #iterator.write(f"Robust solution found (Logit: {metric:.4f})! Stopping early.")
                         iterator.close()
                     break
 
+        # Check requirements and return accordingly
+        if requires == "robust":
+            # Must be robust (best_robust_logit > 0)
+            if best_robust_logit < 0:
+                # Not robust, return original
+                return pd.DataFrame([query_instance], columns=self.data.feature_names)
+        elif requires == "valid":
+            # Must be valid for original model
+            if best_val_term1 is None:
+                # No valid CF found, return original
+                return pd.DataFrame([query_instance], columns=self.data.feature_names)
+            # Check if valid for target_class
+            is_valid = (target_class == 1 and best_val_term1 > 0) or (target_class == 0 and best_val_term1 < 0)
+            if not is_valid:
+                # Not valid, return original
+                return pd.DataFrame([query_instance], columns=self.data.feature_names)
+        # requires == "none": return whatever we got
+        
+        # Return best counterfactual found
         return pd.DataFrame(best_x.cpu().numpy(), columns=self.data.feature_names)

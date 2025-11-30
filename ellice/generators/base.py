@@ -30,6 +30,7 @@ class EllipsoidGenerator(ABC):
         self.reg_coef = reg_coef
         self.device = torch.device(device)
         self.dtype = torch.float32
+        self.progress_bar = None  # Store tqdm progress bar for access
         
         # 1. Setup Model and Split
         self.torch_model = self.model_wrapper.get_torch_model().to(self.device, self.dtype).eval()
@@ -142,14 +143,9 @@ class EllipsoidGenerator(ABC):
                 center_logit = torch.matmul(h_aug, self.omega_c).item()
                 
                 if target_class == 1:
-                    # We want Class 1. Worst case is minimal logit.
                     worst_logit = center_logit - norm.item()
                     prob = 1 / (1 + np.exp(-worst_logit))
                 else:
-                    # We want Class 0. Worst case for Class 0 is maximal logit (high prob for Class 1).
-                    # Or do we return Prob(Class 0)?
-                    # Let's return Prob(Target Class).
-                    # Worst case for Class 0 is minimal Prob(Class 0) => Maximal Prob(Class 1).
                     worst_logit_for_class_1 = center_logit + norm.item()
                     prob_class_1 = 1 / (1 + np.exp(-worst_logit_for_class_1))
                     prob = 1 - prob_class_1

@@ -32,3 +32,6 @@ class GenerationConfig:
     one_way_change: object = None
     allowed_values: object = None
     one_hot_groups: object = None
+    
+    # Requirements
+    requires: str = "valid"  # "valid", "robust", or "none"

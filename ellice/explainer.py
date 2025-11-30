@@ -29,7 +29,7 @@ class Explainer:
             model: The trained model (PyTorch nn.Module, sklearn model, or custom)
             data: ElliCE Data object containing training data
             backend: Backend type ('auto', 'pytorch', 'sklearn', 'custom')
-            device: Device to use ('auto', 'cpu', 'cuda', 'mps'). If None, uses AlgorithmConfig.get_device()
+            device: Device to use ('auto', 'cpu', 'cuda'). If None, uses AlgorithmConfig.get_device()
             backend_model_class: Custom ModelWrapper class (required if backend='custom')
                 Must be a subclass of ModelWrapper and implement required methods.
         """
@@ -37,10 +37,19 @@ class Explainer:
         self.data = data
         
         # Resolve device
-        if device is not None:
-            self.device = device
-        else:
+        allowed_devices = ['auto', 'cpu', 'cuda']
+        if device == 'auto' or device is None:
             self.device = AlgorithmConfig.get_device()
+        else:
+            if device not in allowed_devices:
+                raise ValueError(f"Invalid device '{device}'. Allowed: {allowed_devices}")
+            self.device = device
+        # if device is not None:
+        #     if device not in allowed_devices:
+        #         raise ValueError(f"Invalid device '{device}'. Allowed: {allowed_devices}")
+        #     self.device = device
+        # else:
+        #     self.device = AlgorithmConfig.get_device()
         
     def generate_counterfactuals(
         self,
@@ -59,7 +68,8 @@ class Explainer:
         optimization_params: Optional[Dict[str, Any]] = None,
         target_class: int = 1,
         return_probs: bool = False,
-        progress_bar: bool = True
+        progress_bar: bool = True,
+        requires: str = "valid"
     ) -> pd.DataFrame:
         
         # Standardize Input
@@ -91,6 +101,9 @@ class Explainer:
         # Pass progress_bar via opt_params if supported by generator
         if method == 'continuous':
             opt_params['progress_bar'] = progress_bar
+        
+        # Pass requires to all generators
+        opt_params['requires'] = requires
         
         if method == 'continuous':
             if sparsity:
