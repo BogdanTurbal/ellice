@@ -69,7 +69,9 @@ class Explainer:
         target_class: int = 1,
         return_probs: bool = False,
         progress_bar: bool = True,
-        requires: str = "valid"
+        requires: str = "valid",
+        feature_weights: Optional[Dict[str, float]] = None,
+        group_weights: Optional[Dict[str, float]] = None
     ) -> pd.DataFrame:
         
         # Standardize Input
@@ -101,6 +103,10 @@ class Explainer:
         # Pass progress_bar via opt_params if supported by generator
         if method == 'continuous':
             opt_params['progress_bar'] = progress_bar
+            if feature_weights is not None:
+                opt_params['feature_weights'] = feature_weights
+            if group_weights is not None:
+                opt_params['group_weights'] = group_weights
         
         # Pass requires to all generators
         opt_params['requires'] = requires

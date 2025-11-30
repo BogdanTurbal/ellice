@@ -6,6 +6,8 @@
 
 **ellice** is an efficient library for generating provably robust counterfactual explanations using ElliCE method. It ensures that recommended recourse actions remain valid across the set of all nearly-optimal models (the Rashomon set) using an ellipsoidal approximation, providing stability even if the underlying model is retrained or updated.
 
+![ElliCE Example](images/ellice_example.png)
+
 ## Table of Contents
 
 - [Installation](#installation)

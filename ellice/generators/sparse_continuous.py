@@ -63,7 +63,7 @@ class SparseContinuousGenerator(ContinuousGenerator):
         optimizer = setup['optimizer']
         frozen_indices_cont = setup['frozen_indices_cont']
         frozen_groups_cat = setup['frozen_groups_cat']
-        
+
         # Accumulator for gradients
         grad_accumulator = torch.zeros(input_dim, device=self.device, dtype=self.dtype)
         
