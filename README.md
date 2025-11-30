@@ -66,7 +66,7 @@ Controls default parameters for counterfactual generation:
 - `early_stopping`: Enable early stopping (default: True)
 - `progress_bar`: Show progress bar (default: True)
 
-> **Note:** In practice, `robustness_epsilon` could be set to 10% of train loss as default, or determined using a set of proxy models (hyperparameter tuning is a procedure described in the paper). For example, if we use an additive 0.01 to the train loss, we have `loss <= train loss + 0.01`. 10% of train loss in practice would mean `loss <= train loss * 1.1`. (See `ellice_demo.ipynb` cells 28-29 for details).
+> **Note:** `robustness_epsilon` is an additive parameter which could be set to 10% of train loss as default in practice, or determined using a set of proxy models (hyperparameter tuning is a procedure described in the paper). For example, if we use an additive 0.01 to the train loss, we have `loss <= train loss + 0.01`. 10% of train loss in practice would mean `loss <= train loss * 1.1`.
 
 ### AlgorithmConfig
 Controls algorithmic stability and internal constants:
